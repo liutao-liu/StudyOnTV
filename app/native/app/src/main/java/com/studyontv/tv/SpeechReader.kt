@@ -34,6 +34,7 @@ import java.util.concurrent.Executors
  */
 object SpeechReader {
     private const val SHERPA_ENGINE = "com.k2fsa.sherpa.onnx.tts.engine"
+    private const val ESPEAK_ENGINE = "com.reecedunn.espeak"
     /** 语音识别白名单：白名单外的题目语言不静默当中文，而是降级到设备默认语言并记诊断（#81） */
     private val RECOGNITION_LANGUAGES = listOf("zh-CN", "zh-HK", "zh-TW", "en-US", "en-GB")
     /** 题目可以标注的朗读语言；"" 表示跟随设备系统语言（#126 粤语系统被读成国语的根因是写死 zh-CN） */
@@ -59,13 +60,19 @@ object SpeechReader {
     /** 云端 WAV 走 AudioTrack 播放（华为等设备的 MediaPlayer 播不了，用户反馈），stopNow 时释放 */
     @Volatile private var track: AudioTrack? = null
     private var audioFile: File? = null
-    private var system: TextToSpeech? = null
-    private var ready = false
-    private var pending: (() -> Unit)? = null
-    private var systemInitAttempt = 0
-    private var systemInitTimeout: Runnable? = null
+    private class LocalEngine(val packageName: String? = null) {
+        var tts: TextToSpeech? = null
+        var ready = false
+        var pending: (() -> Unit)? = null
+        var initAttempt = 0
+        var initTimeout: Runnable? = null
+        var boundPackage = ""
+    }
+    private val system = LocalEngine()
+    private val englishEngine = LocalEngine(ESPEAK_ENGINE)
+    private var activeEngine = system
+    private var strictEnglish = false
     private var retriedConnection = false
-    private var systemEngine = ""
     private data class LocalRead(val text: String, val language: String, val rate: Double)
     private var localRead: LocalRead? = null
     private data class LocalAudioCache(val engine: String, val key: String, val language: String, val part: String)
@@ -114,7 +121,7 @@ object SpeechReader {
             if (!has("deepseekVoice")) put("deepseekVoice", "stella")
             if (!has("recognizeMode")) put("recognizeMode", "system")
             if (optString("readScope") !in READ_SCOPES) put("readScope", "question")
-            put("readRepeats", optInt("readRepeats", 3).coerceIn(3, 5))
+            remove("readRepeats")
             for (key in listOf("azureKey", "aliyunSecret", "deepseekKey")) { put(key + "Set", optString(key).isNotEmpty()); remove(key) }
         }
     fun save(store: LocalStore, input: JSONObject): JSONObject {
@@ -127,11 +134,7 @@ object SpeechReader {
             require(scope in READ_SCOPES) { "未知朗读内容" }
             next.put("readScope", scope)
         }
-        if (input.has("readRepeats")) {
-            val repeats = input.getInt("readRepeats")
-            require(repeats in 3..5) { "朗读遍数需为 3、4 或 5" }
-            next.put("readRepeats", repeats)
-        }
+        next.remove("readRepeats")
         if (input.has("recognizeMode")) {
             val recognize = input.optString("recognizeMode", "system")
             require(recognize in RECOGNIZE_MODES) { "未知语音识别通路" }
@@ -179,36 +182,59 @@ object SpeechReader {
     fun read(context: Context, text: String, language: String = "", notice: ((JSONObject) -> Unit)? = null) =
         readTracked(context, text, language, notice, null)
 
-    fun readTracked(context: Context, text: String, language: String, notice: ((JSONObject) -> Unit)?, done: ((Boolean) -> Unit)?) {
+    fun readTracked(context: Context, text: String, language: String, notice: ((JSONObject) -> Unit)?, done: ((Boolean) -> Unit)?) =
+        readText(context, text, language, false, notice, done)
+
+    fun readFeedback(context: Context, text: String, language: String, notice: ((JSONObject) -> Unit)?, done: (Boolean) -> Unit) =
+        readText(context, text, language, isEnglishFeedback(text), notice, done)
+
+    internal fun isEnglishFeedback(text: String): Boolean =
+        text.any { it in 'a'..'z' || it in 'A'..'Z' } && text.none { it in '\u3400'..'\u9fff' || it in '\uf900'..'\ufaff' }
+
+    private fun readText(context: Context, text: String, language: String, english: Boolean,
+                         notice: ((JSONObject) -> Unit)?, done: ((Boolean) -> Unit)?) {
         if (text.isBlank()) { main.post { done?.invoke(false) }; return }
         val app = context.applicationContext
         main.post {
             val config = currentSettings()
             val chosen = readMode(app, config)
             val clean = text.take(10000)
+            val override = config.optString("readLanguage").trim()
             // #126：家长可以在朗读设置里指定设备朗读语言；留空就跟随每道题的语言标注
-            val spoken = when (val override = config.optString("readLanguage").trim()) {
+            val spoken = if (english) {
+                listOf(override, language, defaultLanguage()).firstOrNull { it.startsWith("en-") } ?: "en-US"
+            } else when (override) {
                 "system" -> ""          // 跟随设备系统语言
                 "" -> language          // 跟随题目
                 else -> override
             }
+            val engine = if (english && TtsProbe.defaultEngine(app) != ESPEAK_ENGINE && installedEnglishEngine(app)) englishEngine else system
             val local = if (chosen == "system") LocalRead(clean, spoken, speechRate(config)) else null
             // 手动再点一次同一道题时，让首段继续准备，避免重复排队合成。
             if (done == null && completion == null && local != null && local == localRead && localIndex == 0 && last?.optString("reason") == "preparing") {
                 if (notice != null) this.notice = notice
                 return@post
             }
-            stopNow(stopSystem = chosen != "system")
+            stopNow(stopSystem = chosen != "system" || activeEngine !== engine)
             val request = generation
+            activeEngine = engine
+            strictEnglish = english
             localRead = local
             this.notice = notice
             completion = done
             cachedContext = app
             notify(true, chosen, "preparing", language, language, false, "正在准备朗读")
             if (chosen == "system") systemRead(app, clean, spoken, request)
-            else cloudPart(app, cloudChunks(clean, chosen), 0, spoken, config, chosen, request)
+            else {
+                if (english && chosen == "edge" && !config.optString("edgeVoice").startsWith("en-")) config.put("edgeVoice", "")
+                cloudPart(app, cloudChunks(clean, chosen), 0, spoken, config, chosen, request)
+            }
         }
     }
+
+    private fun installedEnglishEngine(context: Context): Boolean = try {
+        context.packageManager.getApplicationInfo(ESPEAK_ENGINE, 0).enabled
+    } catch (_: android.content.pm.PackageManager.NameNotFoundException) { false }
 
     private fun readMode(context: Context, config: JSONObject): String {
         val mode = config.optString("mode", "system")
@@ -226,7 +252,7 @@ object SpeechReader {
     fun warmUpLocal(context: Context) {
         val app = context.applicationContext
         val connect = Runnable {
-            if (system == null && readMode(app, currentSettings()) == "system") connectSystem(app)
+            if (system.tts == null && readMode(app, currentSettings()) == "system") connectSystem(app, system)
         }
         if (Looper.myLooper() == main.looper) connect.run() else main.post(connect)
     }
@@ -235,17 +261,16 @@ object SpeechReader {
     fun maintainLocalConnection(context: Context) {
         val app = context.applicationContext
         if (TtsProbe.defaultEngine(app) != SHERPA_ENGINE || readMode(app, currentSettings()) != "system") return
-        if (ready && !speaking && localFile == null) {
+        if (system.ready && !speaking && localFile == null) {
             val stopped = try {
                 app.packageManager.getApplicationInfo(SHERPA_ENGINE, 0).flags and ApplicationInfo.FLAG_STOPPED != 0
             } catch (_: Exception) { false }
             if (stopped) {
                 Diag.info("Speech", "reconnecting local engine stopped by the system")
-                try { system?.shutdown() } catch (_: Exception) { }
-                system = null; ready = false
+                disconnectSystem(system)
             }
         }
-        connectSystem(app)
+        connectSystem(app, system)
     }
 
     /** 题目音频。老电视的 https / mp3 兼容性差时不再“点了没反应”：记录诊断 + Toast + 回报给前端 */
@@ -391,10 +416,11 @@ object SpeechReader {
         val callback = completion
         completion = null
         retriedConnection = false
-        generation++; pending = null; localRead = null; localAudioCache = null
+        generation++; activeEngine.pending = null; localRead = null; localAudioCache = null
         localTimeout?.let { main.removeCallbacks(it) }; localTimeout = null
         localFile?.delete(); localFile = null; localParts = emptyList(); localIndex = 0; localFailures = 0
-        if (stopSystem && ready) system?.stop()
+        if (stopSystem && activeEngine.ready) activeEngine.tts?.stop()
+        activeEngine = system; strictEnglish = false
         track?.let {
             try { it.pause(); it.flush() } catch (_: Exception) { }
             try { it.release() } catch (_: Exception) { }
@@ -418,7 +444,7 @@ object SpeechReader {
                 localFile = null
                 val context = cachedContext ?: return@post
                 val cache = localAudioCache?.takeIf {
-                    it.engine == systemEngine && it.language == currentLanguage && localParts.singleOrNull() == it.part
+                    it.engine == activeEngine.boundPackage && it.language == currentLanguage && localParts.singleOrNull() == it.part
                 }
                 worker.execute {
                     try {
@@ -464,7 +490,7 @@ object SpeechReader {
         localTimeout = Runnable { if (request == generation && lastUtteranceId == id && localFile != null)
             localSynthFailed(request, "本地引擎无响应，可能被系统清理") }.also { main.postDelayed(it, 30000) }
         lastLocalSynthesisText = localParts[localIndex]
-        val result = try { system?.synthesizeToFile(lastLocalSynthesisText, null, file, id) ?: TextToSpeech.ERROR }
+        val result = try { activeEngine.tts?.synthesizeToFile(lastLocalSynthesisText, null, file, id) ?: TextToSpeech.ERROR }
             catch (_: Exception) { TextToSpeech.ERROR }
         if (result == TextToSpeech.ERROR) localSynthFailed(request, "本地语音引擎连接已断开")
     }
@@ -476,8 +502,7 @@ object SpeechReader {
         speaking = false
         if (localFailures++ < 1) {
             val rest = localParts.drop(localIndex).joinToString("")
-            try { system?.shutdown() } catch (_: Exception) { }
-            system = null; ready = false
+            disconnectSystem(activeEngine)
             cachedContext?.let { systemRead(it, rest, currentLanguage, request) }
         } else notify(false, "system", "engine-unavailable", currentLanguage, currentLanguage, false, message)
     }
@@ -485,12 +510,13 @@ object SpeechReader {
     private fun systemRead(context: Context, text: String, language: String, request: Int, mode: String = "system") {
         if (request != generation) return
         cachedContext = context.applicationContext
+        val connection = activeEngine
         fun waitForEngine() {
             val speak = { if (request == generation) speakSystem(context, text, language, request, mode) }
-            if (ready) speak()
+            if (connection.ready) speak()
             else {
-                pending = speak
-                connectSystem(context)
+                connection.pending = speak
+                connectSystem(context, connection)
             }
         }
         val read = localRead
@@ -531,47 +557,54 @@ object SpeechReader {
         }
     } catch (_: Exception) { null }
 
-    private fun connectSystem(context: Context) {
-        if (system != null) return
-        val attempt = ++systemInitAttempt
+    private fun disconnectSystem(connection: LocalEngine) {
+        connection.initTimeout?.let { main.removeCallbacks(it) }; connection.initTimeout = null
+        try { connection.tts?.shutdown() } catch (_: Exception) { }
+        connection.tts = null
+        connection.ready = false
+    }
+
+    private fun connectSystem(context: Context, connection: LocalEngine) {
+        if (connection.tts != null) return
+        val attempt = ++connection.initAttempt
         val started = SystemClock.elapsedRealtime()
         fun finish(status: Int, detail: String) {
-            val timeout = systemInitTimeout ?: return
-            if (attempt != systemInitAttempt) return
+            val timeout = connection.initTimeout ?: return
+            if (attempt != connection.initAttempt) return
             main.removeCallbacks(timeout)
-            systemInitTimeout = null
+            connection.initTimeout = null
             val elapsed = SystemClock.elapsedRealtime() - started
-            ready = status == TextToSpeech.SUCCESS && system != null
-            if (ready) {
-                system?.setOnUtteranceProgressListener(progress)
-                Diag.info("Speech", "local engine ready in ${elapsed}ms")
+            connection.ready = status == TextToSpeech.SUCCESS && connection.tts != null
+            if (connection.ready) {
+                connection.tts?.setOnUtteranceProgressListener(progress)
+                Diag.info("Speech", "local engine ${connection.boundPackage} ready in ${elapsed}ms")
             } else {
-                try { system?.shutdown() } catch (_: Exception) { }
-                system = null
+                disconnectSystem(connection)
                 Diag.warn("Speech", "local engine init failed after ${elapsed}ms: $detail")
             }
-            val action = pending
-            pending = null
+            val action = connection.pending
+            connection.pending = null
             action?.invoke()
         }
-        systemInitTimeout = Runnable { finish(TextToSpeech.ERROR, "timeout") }.also { main.postDelayed(it, 30_000L) }
+        connection.initTimeout = Runnable { finish(TextToSpeech.ERROR, "timeout") }.also { main.postDelayed(it, 30_000L) }
         try {
-            systemEngine = TtsProbe.defaultEngine(context)
-            system = TextToSpeech(context) { status -> main.post { finish(status, "status=$status") } }
+            connection.boundPackage = connection.packageName ?: TtsProbe.defaultEngine(context)
+            connection.tts = TextToSpeech(context, { status -> main.post { finish(status, "status=$status") } }, connection.packageName)
         } catch (e: Exception) {
             finish(TextToSpeech.ERROR, e.javaClass.simpleName)
         }
     }
 
     private fun speakSystem(context: Context, text: String, language: String, request: Int, mode: String) {
-        val engine = system
+        val engine = activeEngine.tts
         if (engine == null) {
             notify(false, mode, "engine-unavailable", language, "", false,
                 "这台电视没有内置的系统语音，读不出来；家长可以在面板「题目朗读」里选 DeepSeek 语音")
             return
         }
         val plan = try {
-            resolveLanguage(language, localFallbackLanguage(language)) { tag -> try { engine.setLanguage(Locale.forLanguageTag(tag)) } catch (_: Exception) { null } }
+            val fallback = if (strictEnglish) language else localFallbackLanguage(language)
+            resolveLanguage(language, fallback) { tag -> try { engine.setLanguage(Locale.forLanguageTag(tag)) } catch (_: Exception) { null } }
         } catch (e: Exception) {
             Diag.warn("Speech", "setLanguage failed ${e.javaClass.simpleName}: ${e.message.orEmpty().take(120)}")
             notify(false, mode, "language-check-failed", language, "", false, "系统语音不可用（${e.javaClass.simpleName}）")
@@ -583,13 +616,13 @@ object SpeechReader {
             if (!retriedConnection && runCatching { engine.voice }.getOrNull() == null) {
                 retriedConnection = true
                 Diag.info("Speech", "reconnecting local engine before reading")
-                try { engine.shutdown() } catch (_: Exception) { }
-                system = null; ready = false
+                disconnectSystem(activeEngine)
                 systemRead(context, text, language, request, mode)
                 return
             }
-            notify(false, mode, "language-unavailable", plan.requested, plan.language, true,
-                "这台设备的系统语音不支持 ${plan.requested}，装个语音包或换一种语言再试")
+            val message = if (strictEnglish) "本地语音缺少英文支持，请安装英语朗读引擎后重试"
+                else "这台设备的系统语音不支持 ${plan.requested}，装个语音包或换一种语言再试"
+            notify(false, mode, "language-unavailable", plan.requested, plan.language, true, message)
             return
         }
         // Some engines keep their previous/default voice after setLanguage succeeds.
@@ -910,7 +943,7 @@ object SpeechReader {
                 var offset = 0
                 while (offset < pcm.data.size && request == generation) {
                     val written = created.write(pcm.data, offset, minOf(16 * 1024, pcm.data.size - offset))
-                    if (written <= 0) break
+                    check(written > 0) { "AudioTrack 未能写入音频 ($written)" }
                     offset += written
                 }
                 // 等缓冲区里的最后一段播完再进入下一句；playbackHeadPosition 是无符号 32 位帧计数
@@ -920,8 +953,12 @@ object SpeechReader {
                     System.currentTimeMillis() < deadline) {
                     Thread.sleep(20)
                 }
-                if (request == generation) main.post { if (request == generation) onDone() }
+                if (request == generation) {
+                    check((created.playbackHeadPosition.toLong() and 0xFFFFFFFFL) >= pcm.frames) { "AudioTrack 未播完整段音频" }
+                    main.post { if (request == generation) onDone() }
+                }
             } catch (e: Exception) {
+                if (request != generation) return@execute
                 val message = "${e.javaClass.simpleName}: ${e.message.orEmpty().take(80)}"
                 Diag.warn("Speech", "pcm playback failed $message")
                 main.post { if (request == generation) onError(message) }

@@ -155,20 +155,29 @@ open class DeviceBridge(protected val activity: Activity, private val connection
         }
     }
 
-    @JavascriptInterface
-    fun updateInfo(): String {
-        val info = Updater.newerThanCurrent(activity, Updater.cachedInfo(activity)) ?: return ""
-        return Updater.toJson(info).put("current", Updater.currentVersion(activity)).toString()
-    }
+    private var checkingForUpdates = false
 
     @JavascriptInterface
-    fun installUpdate(url: String, latest: String, notes: String) {
-        val cached = Updater.newerThanCurrent(activity, Updater.cachedInfo(activity))
-        val payload = if (cached != null && cached.url == url) Updater.toJson(cached) else JSONObject()
-            .put("latest", latest).put("notes", notes).put("url", url)
-        payload.put("current", BuildConfig.VERSION_NAME)
+    fun checkForUpdates() {
+        if (!connectionAllowed) return
         activity.runOnUiThread {
-            activity.startActivity(Intent(activity, UpdateActivity::class.java).putExtra("payload", payload.toString()))
+            val view = web ?: return@runOnUiThread
+            if (checkingForUpdates || !view.isShown) return@runOnUiThread
+            checkingForUpdates = true
+            android.widget.Toast.makeText(activity, "正在检查更新…", android.widget.Toast.LENGTH_SHORT).show()
+            Updater.check(activity.applicationContext, forceRefresh = true) { info ->
+                activity.runOnUiThread showResult@{
+                    checkingForUpdates = false
+                    if (activity.isFinishing || activity.isDestroyed || !view.hasWindowFocus()) return@showResult
+                    val newer = Updater.newerThanCurrent(activity, info)
+                    if (newer == null) {
+                        android.widget.Toast.makeText(activity, "未找到可安装的更新，可在家长面板查看检查结果", android.widget.Toast.LENGTH_LONG).show()
+                    } else {
+                        val payload = Updater.toJson(newer).put("force", false)
+                        activity.startActivity(Intent(activity, UpdateActivity::class.java).putExtra("payload", payload.toString()))
+                    }
+                }
+            }
         }
     }
 
@@ -187,6 +196,14 @@ open class DeviceBridge(protected val activity: Activity, private val connection
     }
 
     @JavascriptInterface
+    fun readFeedbackPhrase(text: String, language: String, token: String) {
+        val view = web ?: return
+        SpeechReader.readFeedback(activity, text, language, ::speechNotice) { ok ->
+            quizSpeechResult(view, token, ok)
+        }
+    }
+
+    @JavascriptInterface
     fun stopReading() = SpeechReader.stop()
 
     @JavascriptInterface
@@ -196,7 +213,7 @@ open class DeviceBridge(protected val activity: Activity, private val connection
     @JavascriptInterface
     fun speechStatus(): String = SpeechReader.status().toString()
 
-    /** 失败信息推给网页：页面里装了 window.SOTV_SPEECH_NOTICE 就能显示提示（与 SOTV_INPUT/SOTV_UPDATE 同一约定） */
+    /** 失败信息推给网页：页面里装了 window.SOTV_SPEECH_NOTICE 就能显示提示 */
     private fun speechNotice(payload: JSONObject) {
         val view = web ?: return
         view.post { try { view.evaluateJavascript("window.SOTV_SPEECH_NOTICE&&SOTV_SPEECH_NOTICE($payload)", null) } catch (_: Throwable) { } }

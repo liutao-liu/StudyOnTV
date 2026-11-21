@@ -52,10 +52,11 @@
   function scheduleText() { return (state.learning && state.learning.scheduleText) || ''; }
   // 朗读内容由家长在「设置 → 朗读」里定：只读题干、题干加选项、再加答案（答案在作答后才读）
   var lastAutoReadKey = '', lastAutoReadText = '';
-  var quizRead = null, quizReadTimer, speechSerial = 0;
+  var QUESTION_READ_PASSES = 3, QUESTION_READ_GAP_MS = 3000;
+  var quizRead = null, quizReadTimer, feedbackRead = null, feedbackAudio = null, speechSerial = 0;
   function updateReadingStatus() {
     var status = $('qReadingStatus');
-    status.textContent = quizRead ? '🔊 朗读 ' + quizRead.pass + ' / ' + quizRead.total : '';
+    status.textContent = quizRead ? (quizRead.token ? '🔊 朗读 ' + quizRead.pass : '🔊 等待朗读 ' + (quizRead.pass + 1)) + ' / ' + QUESTION_READ_PASSES : '';
     status.style.display = quizRead ? '' : 'none';
     var read = $('readAloudBtn');
     read.setAttribute('aria-label', quizRead ? '停止朗读' : '朗读题目');
@@ -83,8 +84,7 @@
       return;
     }
     stopQuizReading();
-    quizRead = { text: text, language: language || '', pass: 0,
-      total: Math.min(5, Math.max(3, +(state.speech && state.speech.readRepeats) || 3)) };
+    quizRead = { text: text, language: language || '', pass: 0 };
     readQuizPass();
   }
   function autoReadQuestion(key, text, language) {
@@ -99,6 +99,17 @@
   function speakable(text) {
     if (window.SOTV_PLAIN) return window.SOTV_PLAIN(text);
     return String(text == null ? '' : text).replace(/\$\$?/g, '').trim();
+  }
+  function renderStem(text) {
+    var title = $('qText'), target = title;
+    if (isTv()) {
+      title.textContent = '';
+      target = document.createElement('span');
+      target.className = 'question-ink';
+      title.appendChild(target);
+    }
+    if (window.SOTV_RICH) window.SOTV_RICH(target, text);
+    else target.textContent = text;
   }
   function formatOptionAnswer(item, i) {
     var raw = (item && item.a ? item.a : [])[i];
@@ -443,8 +454,7 @@
     var idx = Math.max(0, Math.min(state.cardIndex || 0, cards.length - 1));
     state.cardIndex = idx;
     var card = cards[idx];
-    if (window.SOTV_RICH) window.SOTV_RICH($('qText'), card.q);
-    else $('qText').textContent = card.q;
+    renderStem(card.q);
     $('qIndex').textContent = idx + 1;
     $('qTotal').textContent = '/ ' + cards.length;
     $('qMode').textContent = (round.focus === 'memorize' ? '闪卡背诵' : round.focus === 'wrong' ? '错题先背再测' : '先背再测') + ' · 背诵 ' + (idx + 1) + '/' + cards.length;
@@ -637,8 +647,7 @@
     if (window._pendingInput) { state.draft = { nonce: round.nonce, text: window._pendingInput.text || '', drawing: window._pendingInput.drawing || '' }; window._pendingInput = null; }
     else if (!state.draft || state.draft.nonce !== round.nonce) state.draft = { nonce: round.nonce, text: '', drawing: '' };
     state.selected = [];
-    if (window.SOTV_RICH) window.SOTV_RICH($('qText'), item.q);
-    else $('qText').textContent = item.q;
+    renderStem(item.q);
     $('qIndex').textContent = round.mode === 'count' ? round.correct || 0 : round.mode === 'streak' ? round.streak : round.mode === 'practice' ? round.answered + 1 : Math.min(round.answered + 1, round.target);
     $('qTotal').textContent = round.mode === 'practice' ? '题' : '/ ' + round.target;
     $('qMode').textContent = (round.extra ? '加练任务' : round.focus === 'wrong' ? '错题闯关' : round.focus === 'due' ? '记忆复习' : round.mode === 'streak' ? '连续答对' : round.mode === 'count' ? '答对指定题数' : round.mode === 'practice' ? '自由练习' : '本组任务') + ' · ' + new Array((item.difficulty || 2) + 1).join('★');
@@ -807,23 +816,62 @@
         else if (state.selected.indexOf(i) >= 0) el.className += ' wrong';
       });
       state.feedback = result;
-      showFeedback(result, item, written);
-      var auto = +state.config.autoNextSeconds || 0;
-      if (auto > 0) nextTimer = window.setTimeout(proceed, Math.max(auto, (result.status && result.status.feedbackSeconds) || 0) * 1000 + 200);
+      showFeedback(result, item, written, +state.config.autoNextSeconds || 0);
     });
   }
   var PRAISE = ['太棒了！', '答对啦！', '完全正确！', '真厉害！', '好样的，继续保持！', '漂亮！你越来越熟练了'];
   var ENCOURAGE = ['没关系，记住正确答案就好', '差一点点，下一题加油！', '错误也是学习的一部分', '别灰心，再接再厉！'];
-  function phrase(list, fallback) {
+  function feedbackPhrase(right) {
+    var list = right ? state.config.praisePhrases : state.config.encouragePhrases;
+    var fallback = right ? PRAISE : ENCOURAGE;
     var pool = (list && list.length ? list : fallback).filter(function (v) { return v && String(v).trim(); });
     if (!pool.length) pool = fallback;
     return String(pool[Math.floor(Math.random() * pool.length)]);
   }
+  function announceResult(message, answer, language, done) {
+    var speech = state.speech || {}, configured = speech.readLanguage || '';
+    var system = speech.systemLanguage || '';
+    var english = /^en(?:-|$)/i.test(configured === 'system' ? system : configured || language || system);
+    feedbackAudio = { message: message, answer: answer ? (english ? 'The correct answer is ' : '正确答案是：') + answer : '',
+      language: language || '' };
+    playFeedback(done);
+  }
+  function playFeedback(done) {
+    var audio = feedbackAudio;
+    if (!audio || feedbackRead) return;
+    if (!canRead() || typeof window.SOTVNative.readQuizPass !== 'function') {
+      nativeCall('readInLanguage', [audio.message + (audio.answer ? '\n' + audio.answer : ''), audio.language]);
+      if (done) done();
+      return;
+    }
+    var method = typeof window.SOTVNative.readFeedbackPhrase === 'function' ? 'readFeedbackPhrase' : 'readQuizPass';
+    feedbackRead = { token: 'feedback-' + (++speechSerial), done: done, speakingAnswer: false };
+    updateFeedbackClock();
+    var token = feedbackRead.token;
+    feedbackRead.timer = window.setTimeout(function () {
+      if (!feedbackRead || feedbackRead.token !== token) return;
+      var callback = feedbackRead.done;
+      stopFeedbackReading();
+      toast('评语朗读超时，可以选择「重听评语」');
+      if (callback) callback();
+    }, 25000);
+    nativeCall(method, [audio.message, audio.language, token]);
+  }
+  function feedbackPhrasePlaying() {
+    return !!feedbackRead && !feedbackRead.speakingAnswer;
+  }
+  function stopFeedbackReading() {
+    if (!feedbackRead) return;
+    window.clearTimeout(feedbackRead.timer);
+    feedbackRead = null;
+    nativeCall('stopReading');
+    updateFeedbackClock();
+  }
   // 答题结果显示在题目下方（参考多邻国），孩子看完后自己按“继续”进入下一题（Issue #3）
-  function showFeedback(result, item, written) {
+  function showFeedback(result, item, written, autoNextSeconds) {
     stopQuizReading();
-    var box = $('qFeedback'), c = state.config, right = !!result.correct;
-    var title = right ? phrase(c.praisePhrases, PRAISE) : phrase(c.encouragePhrases, ENCOURAGE);
+    var box = $('qFeedback'), right = !!result.correct;
+    var message = feedbackPhrase(right), title = message;
     var streakCount = (result.next && result.next.streak) || result.streak || 0;
     if (right && streakCount >= 3) title = '🔥 连续答对 ' + streakCount + ' 题！' + title;
     var answer = '';
@@ -843,10 +891,10 @@
     if (window.SOTV_RICH && result.tip) window.SOTV_RICH($('fbTip'), '解析：' + result.tip);
     else $('fbTip').textContent = result.tip ? '解析：' + result.tip : '';
     // 「题目、选项和答案」：作答之后再读正确答案，作答前不剧透
+    var spokenAnswer = '';
     if (state.speech && state.speech.autoRead && readScope() === 'questionOptionsAnswer') {
-      var spokenAnswer = written ? speakable(result.answerText || '')
+      spokenAnswer = written ? speakable(result.answerText || '')
         : (result.correctIndices || []).map(function (i) { return formatSpokenOption(item, i); }).join('，');
-      if (spokenAnswer) nativeCall('readInLanguage', ['正确答案：' + spokenAnswer, item.language || '']);
     }
     var go = $('fbNext');
     state.feedbackUntil = Date.now() + ((result.status && result.status.feedbackSeconds) || 0) * 1000;
@@ -858,18 +906,41 @@
     all('#qOptions .focusable').forEach(function (el) { el.classList.remove('focusable'); el.classList.add('answered'); });
     var list = focusables(); for (var i = 0; i < list.length; i++) if (list[i] === go) { setFocus(i); break; }
     if (!isTv()) go.focus();
+    var autoNextAt = Date.now() + (autoNextSeconds || 0) * 1000;
+    announceResult(message, spokenAnswer, item.language, autoNextSeconds > 0 ? function () {
+      function nextWhenReady() {
+        if (state.screen !== 'quiz' || state.feedback !== result || state.continuing) return;
+        var delay = Math.max(autoNextAt, state.feedbackUntil || 0) - Date.now();
+        if (delay > 0) nextTimer = window.setTimeout(nextWhenReady, delay + 100);
+        else proceed();
+      }
+      nextWhenReady();
+    } : null);
   }
-  function hideFeedback() { $('qFeedback').className = 'feedback'; state.feedback = null; }
+  function hideFeedback() {
+    window.clearTimeout(nextTimer);
+    stopFeedbackReading();
+    feedbackAudio = null;
+    $('qFeedback').className = 'feedback';
+    state.feedback = null;
+  }
   function updateFeedbackClock() {
+    var reading = feedbackPhrasePlaying(), reviewGo = $('reviewContinue'), reviewReplay = $('reviewReplay');
+    if (reviewGo) reviewGo.disabled = reading;
+    if (reviewReplay) { reviewReplay.disabled = !!feedbackRead; reviewReplay.style.display = canRead() ? '' : 'none'; }
     if (!state.feedback) return;
     var seconds = Math.max(0, Math.ceil(((state.feedbackUntil || 0) - Date.now()) / 1000)), go = $('fbNext');
-    go.disabled = seconds > 0;
-    go.textContent = seconds > 0 ? '查看解析 · ' + seconds + ' 秒' : state.feedback.finished ? '查看结果' : '继续';
+    var replay = $('fbReplay');
+    replay.disabled = !!feedbackRead;
+    replay.style.display = canRead() ? '' : 'none';
+    go.disabled = reading || seconds > 0;
+    go.textContent = reading ? '正在朗读…' : seconds > 0 ? '查看解析 · ' + seconds + ' 秒' : state.feedback.finished ? '查看结果' : '继续';
   }
   window.setInterval(updateFeedbackClock, 500);
   function proceed() {
     var result = state.feedback;
-    if (!result || state.continuing || (state.feedbackUntil || 0) > Date.now()) return;
+    if (!result || state.continuing || feedbackPhrasePlaying() || (state.feedbackUntil || 0) > Date.now()) return;
+    stopFeedbackReading();
     state.continuing = true;
     request('/api/quiz/continue', {}, function (error, response) {
       state.continuing = false;
@@ -923,10 +994,13 @@
     show('lock'); icon($('lockIcon'), result.result.correct ? 'check' : 'pencil');
     $('lockTitle').textContent = '批改完成 · ' + result.score + ' 分';
     $('lockDesc').textContent = result.feedback || '已保存本次批改结果';
-    $('lockNote').textContent = result.result.correct ? '本题通过' : '查看反馈后继续练习';
-    $('lockActions').innerHTML = '<button class="btn btn-primary focusable" data-action="review-continue">' + (result.result.finished && result.result.passed && !isPureStudyMode() ? '继续使用' : '继续答题') + '</button>';
+    var message = feedbackPhrase(!!result.result.correct);
+    $('lockNote').textContent = message;
+    $('lockActions').innerHTML = '<button class="btn btn-primary focusable" id="reviewContinue" data-action="review-continue">' + (result.result.finished && result.result.passed && !isPureStudyMode() ? '继续使用' : '继续答题') + '</button>' +
+      '<button class="btn btn-ghost focusable" id="reviewReplay" data-action="replay-feedback">重听评语</button>';
     if (window.SOTV_MATH) window.SOTV_MATH($('lockDesc'));
     focusDefault();
+    announceResult(message, '', '');
   }
   function pending(id) {
     state.awaiting = true; state.reviewed = false;
@@ -1068,8 +1142,6 @@
       var foot = screen.querySelector('.quiz-foot');
       if (foot) list = list.filter(function (el) { return !foot.contains(el); });
     }
-    // 右上角更新提示也要能用遥控器选中
-    if ($('updateTip').className.indexOf('show') >= 0) list = list.concat(all('#updateTip .focusable'));
     return list.filter(function (el) { return el.offsetWidth > 0 || el.offsetHeight > 0; });
   }
   function reveal(el) {
@@ -1225,7 +1297,12 @@
       });
       return;
     }
-    if (action === 'review-continue' && !state.busy) {
+    if (action === 'replay-feedback' && (state.feedback || state.reviewed) && !feedbackRead) {
+      window.clearTimeout(nextTimer);
+      playFeedback();
+    }
+    if (action === 'review-continue' && !state.busy && !feedbackPhrasePlaying()) {
+      stopFeedbackReading();
       state.busy = true;
       request('/api/quiz/review', { reviewId: state.review.reviewId }, function (error, result) {
         state.busy = false;
@@ -1247,8 +1324,7 @@
       stopQuizReading();
       nativeCall('answerText', [state.draft ? state.draft.text : '', state.round && state.round.question ? state.round.question.q : '']);
     }
-    if (action === 'update-go') { var u = window.currentUpdate; if (u) nativeCall('installUpdate', [u.url, u.latest, u.notes || '']); }
-    if (action === 'update-close') { $('updateTip').className = 'update-tip'; try { if (window.currentUpdate) window.localStorage.setItem('sotv_update_dismissed', window.currentUpdate.latest); } catch (e) {} if (el.classList.contains('focused')) focusDefault(); }
+    if (action === 'check-updates' && state.screen === 'pair') nativeCall('checkForUpdates');
     if (action === 'parent-unlock') {
       if (!canUnlock()) { toast('当前设备不支持密码解锁'); return; }
       state.unlockPending = true;
@@ -1264,11 +1340,13 @@
     if (action === 'clear-drawing') { state.draft.drawing = ''; renderQuestion(); }
     if (action === 'watch-lesson') nativeCall('watchLesson');
     if (action === 'play-audio' && state.round) {
+      if (feedbackPhrasePlaying()) return;
       stopQuizReading();
       var audioTarget = state.round.studyPhase === 'memorize' && state.round.studyCards ? state.round.studyCards[state.cardIndex || 0] : state.round.question;
       if (audioTarget) nativeCall('playAudio', [audioTarget.audio || '']);
     }
     if (action === 'read-aloud') {
+      if (feedbackPhrasePlaying()) return;
       if (quizRead) { stopQuizReading(); return; }
       if (state.round && state.round.studyPhase === 'memorize' && state.round.studyCards) {
         var mCard = state.round.studyCards[state.cardIndex || 0];
@@ -1389,8 +1467,6 @@
     } catch (e) {}
     // 先用上次的主题，避免加载配置前闪一下默认配色
     try { applyTheme(window.localStorage.getItem('sotv_mode')); } catch (e) { applyTheme('dark'); }
-    // 启动时显示已缓存的更新信息（原生层在页面加载前拿到结果时，回调会丢失）
-    try { var cached = nativeCall('updateInfo'); if (cached) window.SOTV_UPDATE(JSON.parse(cached)); } catch (e) {}
     route();
     window.setInterval(function () {
       $('clock').textContent = new Date().toTimeString().slice(0, 5);
@@ -1493,14 +1569,29 @@
     // 遥控器输入完成后直接把焦点放到“提交答案”
     if (isTv() && state.draft.text) { var list = focusables(); for (var i = 0; i < list.length; i++) if (list[i].getAttribute('data-action') === 'submit') { setFocus(i); break; } }
   };
-  window.SOTV_UPDATE = function (info) { if (!info || !info.latest) return; window.currentUpdate = info;
-    try { if (!info.force && window.localStorage.setItem && window.localStorage.getItem('sotv_update_dismissed') === info.latest) return; } catch (e) {} $('updateText').textContent = '发现新版本 v' + info.latest; $('updateTip').className = 'update-tip show'; };
   // 朗读失败（没有系统语音、云端 Key 不对、语言不支持…）直接显示在电视上，不能再「点了没声音」
   window.SOTV_SPEECH_NOTICE = function (info) { if (!info || info.ok !== false) return; toast(String(info.message || '朗读失败，请重试')); };
   window.SOTV_QUIZ_READ_DONE = function (token, ok) {
+    if (feedbackRead && feedbackRead.token === token) {
+      window.clearTimeout(feedbackRead.timer);
+      if (ok && !feedbackRead.speakingAnswer && feedbackAudio && feedbackAudio.answer) {
+        feedbackRead.speakingAnswer = true;
+        feedbackRead.token = 'feedback-' + (++speechSerial);
+        updateFeedbackClock();
+        nativeCall('readQuizPass', [feedbackAudio.answer, feedbackAudio.language, feedbackRead.token]);
+        return;
+      }
+      var done = feedbackRead.done;
+      feedbackRead = null;
+      updateFeedbackClock();
+      if (done) done();
+      return;
+    }
     if (!quizRead || quizRead.token !== token) return;
-    if (ok && quizRead.pass < quizRead.total) {
-      quizReadTimer = window.setTimeout(readQuizPass, 850);
+    if (ok && quizRead.pass < QUESTION_READ_PASSES) {
+      quizRead.token = null;
+      updateReadingStatus();
+      quizReadTimer = window.setTimeout(readQuizPass, QUESTION_READ_GAP_MS);
     } else {
       quizRead = null;
       updateReadingStatus();

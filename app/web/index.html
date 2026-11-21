@@ -14,7 +14,6 @@
   <div class="brand"><span class="logo"><i></i></span><span class="brand-text">题了个题</span></div>
   <div class="topright"><span class="pill" id="topPill">正在连接…</span><span class="clock" id="clock"></span></div>
 </header>
-<div class="update-tip" id="updateTip"><span class="update-text" id="updateText"></span><button class="update-btn focusable" id="updateGo" data-action="update-go">更新</button><button class="update-close focusable" id="updateClose" data-action="update-close" aria-label="关闭">×</button></div>
 <main id="stage">
   <section class="screen" id="screen-quiz">
     <div class="quiz-wrap">
@@ -24,7 +23,7 @@
       <div class="options" id="qOptions"></div>
       <div class="quiz-reading-status" id="qReadingStatus" role="status" aria-live="polite" style="display:none"></div>
       <div class="pool-status" id="qPool"></div>
-      <div class="feedback" id="qFeedback" role="status" aria-live="polite"><div class="fb-icon" id="fbIcon"></div><div class="fb-body"><div class="fb-title" id="fbTitle"></div><div class="fb-answer" id="fbAnswer"></div><div class="fb-tip" id="fbTip"></div></div><button class="btn btn-primary focusable" id="fbNext" data-action="next">继续</button></div>
+      <div class="feedback" id="qFeedback" role="status" aria-live="polite"><div class="fb-icon" id="fbIcon"></div><div class="fb-body"><div class="fb-title" id="fbTitle"></div><div class="fb-answer" id="fbAnswer"></div><div class="fb-tip" id="fbTip"></div></div><button class="btn btn-ghost focusable" id="fbReplay" data-action="replay-feedback" style="display:none">重听评语</button><button class="btn btn-primary focusable" id="fbNext" data-action="next">继续</button></div>
       <div class="quiz-foot"><div class="dots-progress" id="qDots"></div><div class="quiz-foot-right"><div class="hint"><span class="kbd">◀ ▶ ▲ ▼</span><span class="hint-text">选择</span><span class="kbd">OK</span><span class="hint-text">确认</span><span class="kbd">返回</span><span class="hint-text">回到桌面</span></div></div></div>
     </div>
   </section>
@@ -83,7 +82,7 @@
           <li><b>2</b>用相机扫描二维码，或在浏览器打开<br><span class="pair-url" id="pairUrl"></span></li>
           <li><b>3</b>输入管理密码，即可设置规则、题库与批改</li>
         </ol>
-        <div class="lock-actions"><button class="btn btn-primary focusable" data-action="quiz">返回答题</button><button class="btn btn-ghost focusable" data-action="permissions">权限设置</button><button class="btn btn-ghost focusable" data-action="password">修改密码</button></div>
+        <div class="lock-actions"><button class="btn btn-primary focusable" data-action="quiz">返回答题</button><button class="btn btn-ghost focusable" data-action="permissions">权限设置</button><button class="btn btn-ghost focusable" data-action="password">修改密码</button><button class="btn btn-ghost focusable" data-action="check-updates">检查更新</button></div>
       </div>
       <div class="qr-box" id="pairQr"></div>
     </div>

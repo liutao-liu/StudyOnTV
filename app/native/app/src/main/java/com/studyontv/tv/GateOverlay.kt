@@ -261,6 +261,12 @@ class GateOverlay(
                 DeviceBridge.quizSpeechResult(view, token, ok)
             }
         }
+        @JavascriptInterface fun readFeedbackPhrase(text: String, language: String, token: String) {
+            val view = web ?: return
+            SpeechReader.readFeedback(context, text, language, ::speechNotice) { ok ->
+                DeviceBridge.quizSpeechResult(view, token, ok)
+            }
+        }
         @JavascriptInterface fun stopReading() = SpeechReader.stop()
         @JavascriptInterface fun playAudio(url: String) = SpeechReader.playAudio(context, url, ::speechNotice)
         /** 最近一次朗读 / 音频播放的结果（失败时 reason/message/degraded 有值，#87 不再静默） */
@@ -277,7 +283,6 @@ class GateOverlay(
                 if (InputSupport.active) suspend()
             }
         }
-        @JavascriptInterface fun updateInfo(): String = ""
         @JavascriptInterface fun openParent() {
             handler.post {
                 GateService.hideGates()

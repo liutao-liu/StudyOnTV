@@ -10,6 +10,7 @@ import org.json.JSONObject
 class RegressionInstrumentation : Instrumentation() {
     private var mathSpeech = false
     private var localSpeech = false
+    private var feedbackSpeech = false
     private var localCache = ""
     private var probe = false
     private var video = false
@@ -23,6 +24,7 @@ class RegressionInstrumentation : Instrumentation() {
         super.onCreate(arguments)
         mathSpeech = arguments?.getString("mathSpeech") == "1"
         localSpeech = arguments?.getString("localSpeech") == "1"
+        feedbackSpeech = arguments?.getString("feedbackSpeech") == "1"
         localCache = arguments?.getString("localCache").orEmpty()
         probe = arguments?.getString("probe") == "1"
         video = arguments?.getString("video") == "1"
@@ -44,6 +46,11 @@ class RegressionInstrumentation : Instrumentation() {
         }
         if (localSpeech) {
             try { results.putString("stream", LocalSpeechRegression.run(targetContext)); finish(Activity.RESULT_OK, results) }
+            catch (e: Throwable) { results.putString("stream", android.util.Log.getStackTraceString(e)); finish(Activity.RESULT_CANCELED, results) }
+            return
+        }
+        if (feedbackSpeech) {
+            try { results.putString("stream", LocalSpeechRegression.feedback(targetContext)); finish(Activity.RESULT_OK, results) }
             catch (e: Throwable) { results.putString("stream", android.util.Log.getStackTraceString(e)); finish(Activity.RESULT_CANCELED, results) }
             return
         }

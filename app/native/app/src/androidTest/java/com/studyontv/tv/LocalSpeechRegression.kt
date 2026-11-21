@@ -14,6 +14,35 @@ import java.util.concurrent.TimeUnit
 object LocalSpeechRegression {
     private const val TEXT = "小朋友，请认真听完整道题目。小明有三个苹果，妈妈又给了他两个苹果，请问小明现在一共有几个苹果？请听完以后再选择答案。"
 
+    fun feedback(context: Context): String {
+        DeviceRuntime.ensure(context)
+        check(SpeechReader.settings(DeviceRuntime.store).getString("mode") == "system") { "Select local system speech first" }
+        val phrases = listOf("Excellent", "Outstanding", "Perfect", "Well done", "Unbelievable",
+            "Bingo", "Good job", "Wonderful", "Nice Try", "Keep Going")
+        fun verify(text: String, english: Boolean): String {
+            val finished = CountDownLatch(1)
+            var played = false
+            val done: (Boolean) -> Unit = { ok ->
+                played = ok
+                finished.countDown()
+            }
+            if (english) SpeechReader.readFeedback(context, text, "zh-CN", null, done)
+            else SpeechReader.readTracked(context, text, "zh-CN", null, done)
+            check(finished.await(25, TimeUnit.SECONDS)) { "$text timed out: ${SpeechReader.status()}" }
+            val status = SpeechReader.status()
+            val language = status.getString("language")
+            val expected = if (english) "en-" else "zh-"
+            check(played && status.optString("reason") == "done" && language.startsWith(expected)) { "$text: $status" }
+            return "$text ($language)"
+        }
+        try {
+            val played = phrases.map { verify(it, english = true) } + verify("一加二等于多少？", english = false)
+            return "PASS: ${played.joinToString()}\n"
+        } finally {
+            SpeechReader.stop()
+        }
+    }
+
     fun cached(context: Context, replay: Boolean): String {
         DeviceRuntime.ensure(context)
         val text = "八加七等于多少？"

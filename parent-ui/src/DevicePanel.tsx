@@ -1027,13 +1027,13 @@ export default function DevicePanel({
                 title="更新说明"
                 description={updateInfo.notes?.replace(/\[force\]/gi, '').trim()}
               >
-                <span className="text-xs text-muted-foreground">在学习页右上角选择“更新”即可安装。</span>
+                <span className="text-xs text-muted-foreground">在电视的家长管理页选择「检查更新」即可安装。</span>
               </SettingItem>
             )}
             {updateInfo?.installError && (
               <SettingItem
                 title="上次安装失败"
-                description={`${updateInfo.installError}。电视上点「立即更新」会再试一次；系统不给装的话，需要到 设置 → 应用 → 安装未知应用 里允许「题了个题」。`}
+                description={`${updateInfo.installError}。可在电视的家长管理页选择「检查更新」后重试。系统拦截安装时，请在「设置 → 应用 → 安装未知应用」中允许「题了个题」。`}
               >
                 {null}
               </SettingItem>

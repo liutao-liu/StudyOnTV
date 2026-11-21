@@ -80,19 +80,6 @@ open class MainActivity : Activity() {
             .show()
     }
 
-    private fun checkUpdate() {
-        if (this is GateActivity) return
-        Updater.check(this) { info ->
-            val newer = Updater.newerThanCurrent(this, info) ?: return@check
-            runOnUiThread {
-                if (isFinishing || isDestroyed) return@runOnUiThread
-                val raw = DeviceBridge(this).updateInfo()
-                if (newer.force) startActivity(Intent(this, UpdateActivity::class.java).putExtra("payload", raw))
-                else if (::web.isInitialized && !webReleased) web.evaluateJavascript("window.SOTV_UPDATE&&SOTV_UPDATE($raw)", null)
-            }
-        }
-    }
-
     private fun createWeb() {
         if (page == "quiz") SpeechReader.warmUpLocal(this)
         web = WebShell(this).create(Prefs.localBase(this) + "#/$page")
@@ -142,7 +129,6 @@ open class MainActivity : Activity() {
         if (Prefs.onboarded(this)) GateService.ensureRunning(this, "app")
         if (this is GateActivity && !DeviceRuntime.learning.status().optBoolean("free")) MediaPause.pause(this)
         if (webReleased) createWeb()
-        checkUpdate()
         if (::web.isInitialized && !webReleased) web.evaluateJavascript("window.SOTV_RESUME&&SOTV_RESUME()", null)
     }
 

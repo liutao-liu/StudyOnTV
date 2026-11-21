@@ -323,7 +323,8 @@ class LanServer(
                 .put("speech", JSONObject()
                     .put("autoRead", speech.optBoolean("autoRead"))
                     .put("readScope", speech.getString("readScope"))
-                    .put("readRepeats", speech.getInt("readRepeats"))))
+                    .put("readLanguage", speech.getString("readLanguage"))
+                    .put("systemLanguage", SpeechReader.defaultLanguage())))
         }
         router.get("/api/analytics") { ctx ->
             DeviceRuntime.learning.flushUsage()
