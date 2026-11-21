@@ -14,6 +14,32 @@ import java.util.concurrent.TimeUnit
 object LocalSpeechRegression {
     private const val TEXT = "小朋友，请认真听完整道题目。小明有三个苹果，妈妈又给了他两个苹果，请问小明现在一共有几个苹果？请听完以后再选择答案。"
 
+    fun cached(context: Context, replay: Boolean): String {
+        DeviceRuntime.ensure(context)
+        val text = "八加七等于多少？"
+        val start = System.currentTimeMillis()
+        SpeechReader.read(context, text, "zh-CN")
+        var firstPlayback = -1L
+        try {
+            while (System.currentTimeMillis() - start < 45_000) {
+                val state = SpeechReader.status()
+                if (state.optLong("at") >= start) {
+                    check(state.optBoolean("ok")) { state.optString("message") }
+                    if (firstPlayback < 0 && state.optString("reason") == "playing") firstPlayback = state.optLong("at") - start
+                    if (state.optString("reason") == "done") {
+                        check(firstPlayback >= 0) { "Audio never started" }
+                        if (replay) check(SpeechReader.lastLocalSynthesisText != text) { "Repeat synthesized again" }
+                        return "PASS: short Mandarin ${if (replay) "cached replay" else "recording"} started in ${firstPlayback}ms\n"
+                    }
+                }
+                Thread.sleep(30)
+            }
+            error("Short Mandarin playback did not finish")
+        } finally {
+            SpeechReader.stop()
+        }
+    }
+
     fun run(context: Context): String {
         val main = Handler(Looper.getMainLooper())
         val initialized = CountDownLatch(1)

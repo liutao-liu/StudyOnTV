@@ -1,6 +1,7 @@
 package com.studyontv.tv
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioManager
@@ -9,6 +10,7 @@ import android.media.MediaPlayer
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.widget.Toast
@@ -31,6 +33,7 @@ import java.util.concurrent.Executors
  * 回报有两条路：`status()`（桥方法 `speechStatus` 拉取）与 `notice` 回调（桥推给网页的 SOTV_SPEECH_NOTICE）。
  */
 object SpeechReader {
+    private const val SHERPA_ENGINE = "com.k2fsa.sherpa.onnx.tts.engine"
     /** 语音识别白名单：白名单外的题目语言不静默当中文，而是降级到设备默认语言并记诊断（#81） */
     private val RECOGNITION_LANGUAGES = listOf("zh-CN", "zh-HK", "zh-TW", "en-US", "en-GB")
     /** 题目可以标注的朗读语言；"" 表示跟随设备系统语言（#126 粤语系统被读成国语的根因是写死 zh-CN） */
@@ -61,8 +64,11 @@ object SpeechReader {
     private var pending: (() -> Unit)? = null
     private var systemInitAttempt = 0
     private var systemInitTimeout: Runnable? = null
+    private var systemEngine = ""
     private data class LocalRead(val text: String, val language: String, val rate: Double)
     private var localRead: LocalRead? = null
+    private data class LocalAudioCache(val engine: String, val key: String, val language: String, val part: String)
+    private var localAudioCache: LocalAudioCache? = null
     private val tokenLock = Any()
     @Volatile private var token = ""
     @Volatile private var tokenExpires = 0L
@@ -207,9 +213,27 @@ object SpeechReader {
     /** 提前连接本地引擎。首题复用同一个连接，预热期间不合成、不播放。 */
     fun warmUpLocal(context: Context) {
         val app = context.applicationContext
-        main.post {
+        val connect = Runnable {
             if (system == null && readMode(app, currentSettings()) == "system") connectSystem(app)
         }
+        if (Looper.myLooper() == main.looper) connect.run() else main.post(connect)
+    }
+
+    /** Called by the TV's foreground service while the screen is on. */
+    fun maintainLocalConnection(context: Context) {
+        val app = context.applicationContext
+        if (TtsProbe.defaultEngine(app) != SHERPA_ENGINE || readMode(app, currentSettings()) != "system") return
+        if (ready && !speaking && localFile == null) {
+            val stopped = try {
+                app.packageManager.getApplicationInfo(SHERPA_ENGINE, 0).flags and ApplicationInfo.FLAG_STOPPED != 0
+            } catch (_: Exception) { false }
+            if (stopped) {
+                Diag.info("Speech", "reconnecting local engine stopped by the system")
+                try { system?.shutdown() } catch (_: Exception) { }
+                system = null; ready = false
+            }
+        }
+        connectSystem(app)
     }
 
     /** 题目音频。老电视的 https / mp3 兼容性差时不再“点了没反应”：记录诊断 + Toast + 回报给前端 */
@@ -347,7 +371,7 @@ object SpeechReader {
     }
 
     private fun stopNow(stopSystem: Boolean = true) {
-        generation++; pending = null; localRead = null
+        generation++; pending = null; localRead = null; localAudioCache = null
         localTimeout?.let { main.removeCallbacks(it) }; localTimeout = null
         localFile?.delete(); localFile = null; localParts = emptyList(); localIndex = 0; localFailures = 0
         if (stopSystem && ready) system?.stop()
@@ -371,16 +395,16 @@ object SpeechReader {
                 val request = generation
                 val file = localFile ?: return@post
                 localFile = null
+                val context = cachedContext ?: return@post
+                val cache = localAudioCache?.takeIf {
+                    it.engine == systemEngine && it.language == currentLanguage && localParts.singleOrNull() == it.part
+                }
                 worker.execute {
                     try {
-                        val pcm = WavAudio.parse(file.readBytes()) ?: throw IllegalStateException("本地引擎未返回可播放的 PCM WAV")
-                        main.post {
-                            if (request != generation) return@post
-                            localFailures = 0
-                            playPcm(pcm, request, "system", currentLanguage,
-                                onDone = { localIndex++; localSynthPart(request) },
-                                onError = { message -> speaking = false; notify(false, "system", "local-playback-error", currentLanguage, currentLanguage, false, message) })
-                        }
+                        val bytes = file.readBytes()
+                        val pcm = WavAudio.parse(bytes) ?: throw IllegalStateException("本地引擎未返回可播放的 PCM WAV")
+                        if (cache != null) writeDiskCache(context, cache.key, bytes)
+                        main.post { if (request == generation) playLocalPcm(pcm, request) }
                     } catch (e: Exception) {
                         main.post { if (request == generation) localSynthFailed(request, e.message ?: "本地音频读取失败") }
                     } finally { file.delete() }
@@ -393,6 +417,13 @@ object SpeechReader {
             main.post { if (utteranceId == lastUtteranceId && utteranceId?.startsWith("sotv-$generation-") == true)
                 localSynthFailed(generation, "本地合成失败（code=$errorCode）") }
         }
+    }
+
+    private fun playLocalPcm(pcm: WavAudio.Pcm, request: Int) {
+        localFailures = 0
+        playPcm(pcm, request, "system", currentLanguage,
+            onDone = { localIndex++; localSynthPart(request) },
+            onError = { message -> speaking = false; notify(false, "system", "local-playback-error", currentLanguage, currentLanguage, false, message) })
     }
 
     private fun localSynthPart(request: Int) {
@@ -431,14 +462,53 @@ object SpeechReader {
     }
 
     private fun systemRead(context: Context, text: String, language: String, request: Int, mode: String = "system") {
+        if (request != generation) return
         cachedContext = context.applicationContext
-        val speak = { if (request == generation) speakSystem(context, text, language, request, mode) }
-        if (ready) speak()
-        else {
-            pending = speak
-            connectSystem(context)
+        fun waitForEngine() {
+            val speak = { if (request == generation) speakSystem(context, text, language, request, mode) }
+            if (ready) speak()
+            else {
+                pending = speak
+                connectSystem(context)
+            }
+        }
+        val read = localRead
+        if (mode != "system" || read == null || text.length > 48) {
+            waitForEngine()
+            return
+        }
+        worker.execute {
+            val cache = shortLocalAudioCache(context, text, language, read.rate)
+            val pcm = cache?.let { readDiskCache(context, it.key)?.let(WavAudio::parse) }
+            main.post {
+                if (request != generation) return@post
+                if (cache != null && pcm != null) {
+                    Diag.info("Speech", "playing cached local audio")
+                    currentLanguage = cache.language
+                    localParts = listOf(cache.part)
+                    localIndex = 0
+                    playLocalPcm(pcm, request)
+                } else {
+                    localAudioCache = cache
+                    waitForEngine()
+                }
+            }
         }
     }
+
+    private fun shortLocalAudioCache(context: Context, text: String, language: String, rate: Double): LocalAudioCache? = try {
+        val engine = TtsProbe.defaultEngine(context)
+        val target = language.trim().ifEmpty { localFallbackLanguage(language) }
+        val part = packedSentences(MandarinSpeech.normalize(text, target), 48).singleOrNull()?.takeIf { it.isNotBlank() }
+        // Sherpa's installed Mandarin pack has one offline voice. Other engines can change voice per app or use a network voice.
+        if (engine != SHERPA_ENGINE || target != "zh-CN" || part == null) null
+        else {
+            val installed = context.packageManager.getPackageInfo(engine, 0)
+            val pitch = Settings.Secure.getString(context.contentResolver, "tts_default_pitch")
+            val key = "local-mandarin-v1|$engine|${installed.lastUpdateTime}|$target|$rate|$pitch|$part"
+            LocalAudioCache(engine, key, target, part)
+        }
+    } catch (_: Exception) { null }
 
     private fun connectSystem(context: Context) {
         if (system != null) return
@@ -465,6 +535,7 @@ object SpeechReader {
         }
         systemInitTimeout = Runnable { finish(TextToSpeech.ERROR, "timeout") }.also { main.postDelayed(it, 30_000L) }
         try {
+            systemEngine = TtsProbe.defaultEngine(context)
             system = TextToSpeech(context) { status -> main.post { finish(status, "status=$status") } }
         } catch (e: Exception) {
             finish(TextToSpeech.ERROR, e.javaClass.simpleName)

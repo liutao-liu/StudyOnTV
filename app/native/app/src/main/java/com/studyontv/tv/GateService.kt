@@ -42,6 +42,7 @@ class GateService : Service() {
     private var countdownActiveAt = -1L
     private var countdownPackage: String? = null
     private var speechWarmupRequested = false
+    private var lastSpeechCheckAt = -1L
     private var lastAwake: Boolean? = null
     /** 「一个监控能力都没有」的起始时刻 / 是否已经提示过（#17：不能静默失效） */
     private var capabilityMissingSince = -1L
@@ -62,7 +63,10 @@ class GateService : Service() {
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
-                Intent.ACTION_SCREEN_ON -> screenOn = true
+                Intent.ACTION_SCREEN_ON -> {
+                    screenOn = true
+                    if (DeviceBridge.isTv(this@GateService)) SpeechReader.warmUpLocal(this@GateService)
+                }
                 Intent.ACTION_SCREEN_OFF -> screenOn = false
             }
         }
@@ -117,7 +121,17 @@ class GateService : Service() {
         val power = getSystemService(POWER_SERVICE) as PowerManager
         val locked = (getSystemService(KEYGUARD_SERVICE) as KeyguardManager).isKeyguardLocked
         val awake = power.isInteractive && !locked && screenOn && displayOn()
-        if (lastAwake != awake) { DeviceRuntime.learning.awake(awake); lastAwake = awake }
+        if (lastAwake != awake) {
+            // 待机时被固件重启后若已到答题时间，可以在亮屏前先发起连接。
+            val quizDueAfterRestart = lastAwake == null && status.optString("reason") == "timeup"
+            if ((awake || quizDueAfterRestart) && DeviceBridge.isTv(this)) SpeechReader.warmUpLocal(this)
+            DeviceRuntime.learning.awake(awake)
+            lastAwake = awake
+        }
+        if (awake && DeviceBridge.isTv(this) && (lastSpeechCheckAt < 0 || now - lastSpeechCheckAt >= 15_000L)) {
+            lastSpeechCheckAt = now
+            SpeechReader.maintainLocalConnection(this)
+        }
         val monitoring = canOverlay || WatchAccessibilityService.connected || Foreground.hasUsageAccess(this)
         // #17 次要项：新装机一个监控权限都没有时，不能一声不响（连续 5 分钟才提示一次）
         trackCapability(monitoring, now)
