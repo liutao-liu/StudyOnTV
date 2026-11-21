@@ -179,6 +179,14 @@ open class DeviceBridge(protected val activity: Activity, private val connection
     fun readInLanguage(text: String, language: String) = SpeechReader.read(activity, text, language, ::speechNotice)
 
     @JavascriptInterface
+    fun readQuizPass(text: String, language: String, token: String) {
+        val view = web ?: return
+        SpeechReader.readTracked(activity, text, language, ::speechNotice) { ok ->
+            quizSpeechResult(view, token, ok)
+        }
+    }
+
+    @JavascriptInterface
     fun stopReading() = SpeechReader.stop()
 
     @JavascriptInterface
@@ -203,6 +211,12 @@ open class DeviceBridge(protected val activity: Activity, private val connection
     }
 
     companion object {
+        fun quizSpeechResult(view: android.webkit.WebView, token: String, ok: Boolean) {
+            view.post {
+                view.evaluateJavascript("window.SOTV_QUIZ_READ_DONE&&SOTV_QUIZ_READ_DONE(${JSONObject.quote(token)},$ok)", null)
+            }
+        }
+
         /** 锁定页家长验证后临时解锁的分钟数 */
         const val QUIZ_UNLOCK_MINUTES = 30
 

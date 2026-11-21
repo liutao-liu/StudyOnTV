@@ -64,6 +64,7 @@ object SpeechReader {
     private var pending: (() -> Unit)? = null
     private var systemInitAttempt = 0
     private var systemInitTimeout: Runnable? = null
+    private var retriedConnection = false
     private var systemEngine = ""
     private data class LocalRead(val text: String, val language: String, val rate: Double)
     private var localRead: LocalRead? = null
@@ -78,6 +79,7 @@ object SpeechReader {
     @Volatile private var speaking = false
     /** 桥的回报回调（只在一次朗读 / 播放期间持有，stopNow 释放，避免长期抓住 WebView） */
     private var notice: ((JSONObject) -> Unit)? = null
+    private var completion: ((Boolean) -> Unit)? = null
     private var cachedContext: Context? = null
     private var currentText = ""
     private var currentLanguage = ""
@@ -112,6 +114,7 @@ object SpeechReader {
             if (!has("deepseekVoice")) put("deepseekVoice", "stella")
             if (!has("recognizeMode")) put("recognizeMode", "system")
             if (optString("readScope") !in READ_SCOPES) put("readScope", "question")
+            put("readRepeats", optInt("readRepeats", 3).coerceIn(3, 5))
             for (key in listOf("azureKey", "aliyunSecret", "deepseekKey")) { put(key + "Set", optString(key).isNotEmpty()); remove(key) }
         }
     fun save(store: LocalStore, input: JSONObject): JSONObject {
@@ -123,6 +126,11 @@ object SpeechReader {
             val scope = input.optString("readScope", "question")
             require(scope in READ_SCOPES) { "未知朗读内容" }
             next.put("readScope", scope)
+        }
+        if (input.has("readRepeats")) {
+            val repeats = input.getInt("readRepeats")
+            require(repeats in 3..5) { "朗读遍数需为 3、4 或 5" }
+            next.put("readRepeats", repeats)
         }
         if (input.has("recognizeMode")) {
             val recognize = input.optString("recognizeMode", "system")
@@ -168,8 +176,11 @@ object SpeechReader {
      * 朗读。`language` 是题目语言；引擎不支持时先回落设备默认语言，再不行回报失败。
      * `notice` 由桥传入，失败时回调（网页里有 window.SOTV_SPEECH_NOTICE 就能显示提示）。
      */
-    fun read(context: Context, text: String, language: String = "", notice: ((JSONObject) -> Unit)? = null) {
-        if (text.isBlank()) return
+    fun read(context: Context, text: String, language: String = "", notice: ((JSONObject) -> Unit)? = null) =
+        readTracked(context, text, language, notice, null)
+
+    fun readTracked(context: Context, text: String, language: String, notice: ((JSONObject) -> Unit)?, done: ((Boolean) -> Unit)?) {
+        if (text.isBlank()) { main.post { done?.invoke(false) }; return }
         val app = context.applicationContext
         main.post {
             val config = currentSettings()
@@ -183,7 +194,7 @@ object SpeechReader {
             }
             val local = if (chosen == "system") LocalRead(clean, spoken, speechRate(config)) else null
             // 手动再点一次同一道题时，让首段继续准备，避免重复排队合成。
-            if (local != null && local == localRead && localIndex == 0 && last?.optString("reason") == "preparing") {
+            if (done == null && completion == null && local != null && local == localRead && localIndex == 0 && last?.optString("reason") == "preparing") {
                 if (notice != null) this.notice = notice
                 return@post
             }
@@ -191,6 +202,7 @@ object SpeechReader {
             val request = generation
             localRead = local
             this.notice = notice
+            completion = done
             cachedContext = app
             notify(true, chosen, "preparing", language, language, false, "正在准备朗读")
             if (chosen == "system") systemRead(app, clean, spoken, request)
@@ -343,6 +355,11 @@ object SpeechReader {
     private fun notify(ok: Boolean, mode: String, reason: String, requested: String, language: String, degraded: Boolean, message: String) {
         val payload = failureNotice(mode, reason, requested, language, degraded, message).put("ok", ok)
         last = payload
+        if (reason == "done" || (!ok && reason != "cloud-unavailable")) {
+            val callback = completion
+            completion = null
+            callback?.invoke(ok)
+        }
         // 成功只更新状态；只有失败才写诊断 + 推给网页（避免正常朗读也被当成提示）
         if (ok) return
         Diag.warn("Speech", "failed mode=$mode reason=$reason requested=${requested.ifEmpty { "-" }} used=${language.ifEmpty { "-" }} message=$message")
@@ -371,6 +388,9 @@ object SpeechReader {
     }
 
     private fun stopNow(stopSystem: Boolean = true) {
+        val callback = completion
+        completion = null
+        retriedConnection = false
         generation++; pending = null; localRead = null; localAudioCache = null
         localTimeout?.let { main.removeCallbacks(it) }; localTimeout = null
         localFile?.delete(); localFile = null; localParts = emptyList(); localIndex = 0; localFailures = 0
@@ -383,6 +403,7 @@ object SpeechReader {
         player?.release(); player = null; audioFile?.delete(); audioFile = null
         speaking = false; currentText = ""; currentLanguage = ""; lastUtteranceId = ""; retriedDefault = false
         notice = null
+        callback?.invoke(false)
     }
 
     /** Synthesize locally, but play PCM in this process: HyperOS may kill the engine mid-playback. */
@@ -558,6 +579,15 @@ object SpeechReader {
         }
         if (plan.reason == "fallback") Diag.info("Speech", "language ${plan.requested} unavailable, fell back to ${plan.language}")
         if (!plan.accepted) {
+            // HyperOS can reclaim the engine after init succeeds, leaving a disconnected TextToSpeech instance.
+            if (!retriedConnection && runCatching { engine.voice }.getOrNull() == null) {
+                retriedConnection = true
+                Diag.info("Speech", "reconnecting local engine before reading")
+                try { engine.shutdown() } catch (_: Exception) { }
+                system = null; ready = false
+                systemRead(context, text, language, request, mode)
+                return
+            }
             notify(false, mode, "language-unavailable", plan.requested, plan.language, true,
                 "这台设备的系统语音不支持 ${plan.requested}，装个语音包或换一种语言再试")
             return
@@ -838,9 +868,12 @@ object SpeechReader {
                 // 云端合成失败：记诊断并告诉屏幕上的人原因，再回落系统语音（电视上常常没有，会再报一次）
                 Diag.warn("Speech", "cloud synth failed mode=$mode ${e.javaClass.simpleName}: ${e.message.orEmpty().take(120)}, fallback to system")
                 if (generation != request) return@execute
-                notify(false, mode, "cloud-unavailable", language, "", true,
-                    "云端朗读失败：${(e.message ?: e.javaClass.simpleName).take(80)}")
-                main.post { systemRead(context, parts.drop(index).joinToString(""), language, request, mode) }
+                main.post {
+                    if (generation != request) return@post
+                    notify(false, mode, "cloud-unavailable", language, "", true,
+                        "云端朗读失败：${(e.message ?: e.javaClass.simpleName).take(80)}")
+                    systemRead(context, parts.drop(index).joinToString(""), language, request, mode)
+                }
             }
         }
     }

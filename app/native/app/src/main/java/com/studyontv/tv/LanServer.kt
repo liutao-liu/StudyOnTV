@@ -310,6 +310,7 @@ class LanServer(
         }
         router.get("/api/state") { ctx ->
             DeviceRuntime.learning.flushUsage()
+            val speech = SpeechReader.settings(store)
             json(ctx, 200, JSONObject()
                 .put("config", store.config())
                 .put("today", store.todayStats())
@@ -320,8 +321,9 @@ class LanServer(
                 .put("learning", DeviceRuntime.learning.status())
                 .put("children", store.children()).put("activeChild", store.activeChild())
                 .put("speech", JSONObject()
-                    .put("autoRead", SpeechReader.settings(store).optBoolean("autoRead"))
-                    .put("readScope", SpeechReader.settings(store).optString("readScope", "question"))))
+                    .put("autoRead", speech.optBoolean("autoRead"))
+                    .put("readScope", speech.getString("readScope"))
+                    .put("readRepeats", speech.getInt("readRepeats"))))
         }
         router.get("/api/analytics") { ctx ->
             DeviceRuntime.learning.flushUsage()

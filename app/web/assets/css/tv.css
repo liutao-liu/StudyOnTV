@@ -902,6 +902,7 @@ html.tv-device[data-mode="light"] .tv-input-hint { color: #8A8A8A; background: r
 
 /* 「朗读」按钮固定在页脚，不占用选项区，避免遥控器在选项之间误选 */
 .quiz-foot-right { display: -webkit-flex; display: flex; -webkit-align-items: center; align-items: center; }
+.quiz-reading-status { margin-top: .6rem; font-size: 1rem; text-align: center; }
 html.tv-device .read-aloud-btn { font-size: 1.8rem; padding: 1rem 2rem; margin-right: 2.4rem; opacity: .6; }
 html.tv-device .read-aloud-btn.focused { opacity: 1; }
 /* 手机 / 平板也保留「朗读」按钮：家长常用于让孩子重听题干（以前这里把整个页脚右侧连同按钮一起隐藏了） */

@@ -255,6 +255,12 @@ class GateOverlay(
         }
         @JavascriptInterface fun readAloud(text: String) = SpeechReader.read(context, text, "", ::speechNotice)
         @JavascriptInterface fun readInLanguage(text: String, language: String) = SpeechReader.read(context, text, language, ::speechNotice)
+        @JavascriptInterface fun readQuizPass(text: String, language: String, token: String) {
+            val view = web ?: return
+            SpeechReader.readTracked(context, text, language, ::speechNotice) { ok ->
+                DeviceBridge.quizSpeechResult(view, token, ok)
+            }
+        }
         @JavascriptInterface fun stopReading() = SpeechReader.stop()
         @JavascriptInterface fun playAudio(url: String) = SpeechReader.playAudio(context, url, ::speechNotice)
         /** 最近一次朗读 / 音频播放的结果（失败时 reason/message/degraded 有值，#87 不再静默） */

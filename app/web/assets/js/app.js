@@ -52,12 +52,47 @@
   function scheduleText() { return (state.learning && state.learning.scheduleText) || ''; }
   // 朗读内容由家长在「设置 → 朗读」里定：只读题干、题干加选项、再加答案（答案在作答后才读）
   var lastAutoReadKey = '', lastAutoReadText = '';
+  var quizRead = null, quizReadTimer, speechSerial = 0;
+  function updateReadingStatus() {
+    var status = $('qReadingStatus');
+    status.textContent = quizRead ? '🔊 朗读 ' + quizRead.pass + ' / ' + quizRead.total : '';
+    status.style.display = quizRead ? '' : 'none';
+    var read = $('readAloudBtn');
+    read.setAttribute('aria-label', quizRead ? '停止朗读' : '朗读题目');
+    read.setAttribute('title', quizRead ? '按确定键停止朗读' : '按确定键朗读题目');
+    window.setTimeout(fitQuiz, 0);
+  }
+  function stopQuizReading() {
+    window.clearTimeout(quizReadTimer);
+    quizRead = null;
+    nativeCall('stopReading');
+    updateReadingStatus();
+  }
+  function readQuizPass() {
+    var reading = quizRead;
+    if (!reading) return;
+    reading.pass++;
+    reading.token = 'read-' + (++speechSerial);
+    updateReadingStatus();
+    nativeCall('readQuizPass', [reading.text, reading.language, reading.token]);
+  }
+  function repeatQuestion(text, language) {
+    if (!text || !canRead()) return;
+    if (typeof window.SOTVNative.readQuizPass !== 'function') {
+      nativeCall('readInLanguage', [text, language || '']);
+      return;
+    }
+    stopQuizReading();
+    quizRead = { text: text, language: language || '', pass: 0,
+      total: Math.min(5, Math.max(3, +(state.speech && state.speech.readRepeats) || 3)) };
+    readQuizPass();
+  }
   function autoReadQuestion(key, text, language) {
     // Resume/input/layout redraws of the same question must not flush its speech queue.
     if (lastAutoReadKey === key && lastAutoReadText === text) return;
     lastAutoReadKey = key; lastAutoReadText = text;
-    if (state.speech && state.speech.autoRead) nativeCall('readInLanguage', [text, language || '']);
-    else nativeCall('stopReading');
+    if (state.speech && state.speech.autoRead) repeatQuestion(text, language);
+    else stopQuizReading();
   }
   function readScope() { return (state.speech && state.speech.readScope) || 'question'; }
   // 公式里的 $ 符号和富文本标记 TTS 会念出来，朗读前去掉
@@ -119,7 +154,12 @@
     all('.screen').forEach(function (el) { el.className = 'screen'; });
     var target = $('screen-' + screen);
     if (target) target.className = 'screen active';
+    var leavingQuiz = state.screen === 'quiz' && screen !== 'quiz';
     state.screen = screen;
+    if (leavingQuiz) {
+      lastAutoReadKey = '';
+      stopQuizReading();
+    }
     document.body.className = 'on-' + screen;
   }
   function pill() {
@@ -274,6 +314,7 @@
 
   function start(arg) {
     if (state.busy) return;
+    if (quizRead) stopQuizReading();
     var payload = buildStartPayload(arg);
     if (payload.focus) state.lastStartOpts = payload;
     else if (!arg) state.lastStartOpts = null;
@@ -369,6 +410,7 @@
   function quizEmpty(message) {
     state.round = null; state.busy = false; clearRound();
     show('quiz');
+    stopQuizReading();
     $('qText').textContent = message || '题库为空，请由家长添加题目';
     $('qOptions').className = 'options solo';
     $('qOptions').innerHTML = '<button class="btn btn-primary focusable" data-action="retry">重试</button>' +
@@ -692,7 +734,7 @@
     if (!wrap) return;
     if (!isTv() || !state.round || state.screen !== 'quiz') { wrap.className = 'quiz-wrap'; return; }
     var head = wrap.querySelector('.quiz-head'), foot = wrap.querySelector('.quiz-foot');
-    var question = $('qText'), options = $('qOptions');
+    var question = $('qText'), options = quizRead ? $('qReadingStatus') : $('qOptions');
     // 前两档要求整屏放下；最后一档允许超出，交给 #stage 滚动
     var steps = ['', 'compact', 'compact-2'];
     for (var i = 0; i < steps.length; i++) {
@@ -729,6 +771,7 @@
   function choose(index) {
     // 保护期只丢弃选项选择和提交，朗读、输入等其他操作仍可使用。
     if (state.busy || !state.round || questionInputBlocked()) return;
+    if (quizRead) stopQuizReading();
     if (state.round.question.type === 'multiple') {
       var pos = state.selected.indexOf(index);
       if (pos < 0) state.selected.push(index); else state.selected.splice(pos, 1);
@@ -742,6 +785,7 @@
     if (state.busy || !state.round || questionInputBlocked()) return;
     var round = state.round, item = round.question, written = $('writtenAnswer');
     if (written ? (!written.value.trim() && !state.draft.drawing) : !state.selected.length) { toast('请先填写或选择答案'); return; }
+    stopQuizReading();
     state.busy = true;
     request('/api/quiz/answer', { roundId: round.id, nonce: round.nonce, selections: state.selected, text: written ? written.value : '', drawing: state.draft ? state.draft.drawing : '' }, function (error, result) {
       if (error) { state.busy = false; toast(error); return; }
@@ -777,6 +821,7 @@
   }
   // 答题结果显示在题目下方（参考多邻国），孩子看完后自己按“继续”进入下一题（Issue #3）
   function showFeedback(result, item, written) {
+    stopQuizReading();
     var box = $('qFeedback'), c = state.config, right = !!result.correct;
     var title = right ? phrase(c.praisePhrases, PRAISE) : phrase(c.encouragePhrases, ENCOURAGE);
     var streakCount = (result.next && result.next.streak) || result.streak || 0;
@@ -1112,6 +1157,7 @@
       return;
     }
     if (action === 'reveal-card') {
+      stopQuizReading();
       state.cardRevealed = true;
       renderStudyCard();
       if (state.speech && state.speech.autoRead && readScope() === 'questionOptionsAnswer' && state.round && state.round.studyCards) {
@@ -1191,10 +1237,16 @@
         else start();
       });
     }
-    if (action === 'voice') nativeCall('answerVoice', [state.draft ? state.draft.text : '', state.round && state.round.question ? state.round.question.q : '', state.round && state.round.question ? state.round.question.language || '' : '']);
-    if (action === 'handwrite') nativeCall('answerInput', [false]);
+    if (action === 'voice') {
+      stopQuizReading();
+      nativeCall('answerVoice', [state.draft ? state.draft.text : '', state.round && state.round.question ? state.round.question.q : '', state.round && state.round.question ? state.round.question.language || '' : '']);
+    }
+    if (action === 'handwrite') { stopQuizReading(); nativeCall('answerInput', [false]); }
     if (action === 'choose-level') start(el.getAttribute('data-level'));
-    if (action === 'type-answer' && !state.busy) nativeCall('answerText', [state.draft ? state.draft.text : '', state.round && state.round.question ? state.round.question.q : '']);
+    if (action === 'type-answer' && !state.busy) {
+      stopQuizReading();
+      nativeCall('answerText', [state.draft ? state.draft.text : '', state.round && state.round.question ? state.round.question.q : '']);
+    }
     if (action === 'update-go') { var u = window.currentUpdate; if (u) nativeCall('installUpdate', [u.url, u.latest, u.notes || '']); }
     if (action === 'update-close') { $('updateTip').className = 'update-tip'; try { if (window.currentUpdate) window.localStorage.setItem('sotv_update_dismissed', window.currentUpdate.latest); } catch (e) {} if (el.classList.contains('focused')) focusDefault(); }
     if (action === 'parent-unlock') {
@@ -1212,10 +1264,12 @@
     if (action === 'clear-drawing') { state.draft.drawing = ''; renderQuestion(); }
     if (action === 'watch-lesson') nativeCall('watchLesson');
     if (action === 'play-audio' && state.round) {
+      stopQuizReading();
       var audioTarget = state.round.studyPhase === 'memorize' && state.round.studyCards ? state.round.studyCards[state.cardIndex || 0] : state.round.question;
       if (audioTarget) nativeCall('playAudio', [audioTarget.audio || '']);
     }
     if (action === 'read-aloud') {
+      if (quizRead) { stopQuizReading(); return; }
       if (state.round && state.round.studyPhase === 'memorize' && state.round.studyCards) {
         var mCard = state.round.studyCards[state.cardIndex || 0];
         if (mCard) {
@@ -1225,7 +1279,8 @@
             if (cardAns) cardSpoken += '。正确答案：' + cardAns;
             if (mCard.tip) cardSpoken += '。解析：' + speakable(mCard.tip);
           }
-          nativeCall('readInLanguage', [cardSpoken, mCard.language || '']);
+          if (state.cardRevealed) nativeCall('readInLanguage', [cardSpoken, mCard.language || '']);
+          else repeatQuestion(cardSpoken, mCard.language);
         }
         return;
       }
@@ -1239,7 +1294,8 @@
         }).join('，') || speakable(feedback.answerText || '');
         if (correct) spoken += '。正确答案：' + correct;
       }
-      nativeCall('readInLanguage', [spoken, readItem ? readItem.language || '' : '']);
+      if (feedback) nativeCall('readInLanguage', [spoken, readItem ? readItem.language || '' : '']);
+      else if (readItem) repeatQuestion(spoken, readItem.language);
     }
     // retry 用于错误 / 空题库的重试，start-quiz 用于「时间到了」页的「开始答题」；两者都重新取题
     if (action === 'retry') start(state.lastStartOpts);
@@ -1441,6 +1497,15 @@
     try { if (!info.force && window.localStorage.setItem && window.localStorage.getItem('sotv_update_dismissed') === info.latest) return; } catch (e) {} $('updateText').textContent = '发现新版本 v' + info.latest; $('updateTip').className = 'update-tip show'; };
   // 朗读失败（没有系统语音、云端 Key 不对、语言不支持…）直接显示在电视上，不能再「点了没声音」
   window.SOTV_SPEECH_NOTICE = function (info) { if (!info || info.ok !== false) return; toast(String(info.message || '朗读失败，请重试')); };
+  window.SOTV_QUIZ_READ_DONE = function (token, ok) {
+    if (!quizRead || quizRead.token !== token) return;
+    if (ok && quizRead.pass < quizRead.total) {
+      quizReadTimer = window.setTimeout(readQuizPass, 850);
+    } else {
+      quizRead = null;
+      updateReadingStatus();
+    }
+  };
   window.SOTV_NAVIGATION_BLOCKED = function (message) { toast(message || '现在暂不可用'); return true; };
   window.TV = {
     move: move,

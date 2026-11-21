@@ -34,6 +34,7 @@ const readLanguageValue=(value:any)=>(readLanguages.some(([v])=>v===value)?value
 /** 朗读内容：只读题干、题干加选项、再加正确答案（答案在作答之后再读，作答前不剧透） */
 const readScopes:[string,string][]=[['question','只读题目'],['questionOptions','题目和选项'],['questionOptionsAnswer','题目、选项和答案']];
 const readScopeValue=(value:any)=>(readScopes.some(([v])=>v===value)?value:'question');
+const readRepeats=['3','4','5'];
 const labels:Record<string,string>={azureRegion:'Azure 区域',azureVoice:'Azure 音色',azureKey:'Azure Key',aliyunAppKey:'阿里云 AppKey',aliyunAccessKeyId:'阿里云 AccessKey ID',aliyunSecret:'阿里云 AccessKey Secret',aliyunVoice:'阿里云音色',deepseekKey:'DeepSeek API Key',deepseekVoice:'DeepSeek 音色',recognizeMode:'语音识别通路'};
 const azureFields=['azureRegion','azureVoice','azureKey'],aliyunFields=['aliyunAppKey','aliyunAccessKeyId','aliyunSecret','aliyunVoice'],deepseekFields=['deepseekKey','deepseekVoice'];
 
@@ -133,6 +134,15 @@ export default function SpeechSettings({sessionId}:{sessionId:number}){
     <Item size="sm" className="rounded-none px-0 py-4" id="setting-auto-read">
      <ItemContent><ItemTitle>自动朗读题目</ItemTitle></ItemContent>
      <ItemActions><Switch aria-label="自动朗读题目" checked={!!form.autoRead} onCheckedChange={value=>change('autoRead',value)}/></ItemActions>
+    </Item>
+    <Item size="sm" className="rounded-none px-0 py-4">
+     <ItemContent><ItemTitle>每题朗读遍数</ItemTitle><ItemDescription className="text-xs">每遍之间会停顿。孩子可以随时按朗读键停止。</ItemDescription></ItemContent>
+     <ItemActions>
+      <Select value={String(form.readRepeats??3)} onValueChange={value=>change('readRepeats',Number(value))}>
+       <SelectTrigger aria-label="每题朗读遍数" className="w-full sm:w-44"><SelectValue>{form.readRepeats??3} 遍</SelectValue></SelectTrigger>
+       <SelectContent>{readRepeats.map(value=><SelectItem key={value} value={value}>{value} 遍</SelectItem>)}</SelectContent>
+      </Select>
+     </ItemActions>
     </Item>
     <Item size="sm" className="rounded-none px-0 py-4" id="setting-read-scope" data-invalid={!!errors.readScope}>
      <ItemContent><ItemTitle>朗读内容</ItemTitle><ItemDescription className="text-xs">选「和答案」时，答案在作答之后再读，作答前不会剧透。</ItemDescription><FieldError>{errors.readScope}</FieldError></ItemContent>
