@@ -94,6 +94,7 @@ open class MainActivity : Activity() {
     }
 
     private fun createWeb() {
+        if (page == "quiz") SpeechReader.warmUpLocal(this)
         web = WebShell(this).create(Prefs.localBase(this) + "#/$page")
         web.addJavascriptInterface(DeviceBridge(this, false, web), "SOTVNative")
         setContentView(web)
@@ -122,6 +123,7 @@ open class MainActivity : Activity() {
         val reason = intent?.getStringExtra("reason")
         page = if (this is GateActivity && reason != null && reason !in listOf("timeup", "feedback")) "lock?reason=$reason" else "quiz"
         if (::web.isInitialized && !webReleased) {
+            if (page == "quiz") SpeechReader.warmUpLocal(this)
             web.loadUrl(Prefs.localBase(this) + "#/$page")
             web.evaluateJavascript("window.SOTV_RESUME&&SOTV_RESUME()", null)
         }

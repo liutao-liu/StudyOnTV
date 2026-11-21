@@ -108,7 +108,9 @@ class GateOverlay(
             // 已经挂载时管控原因变化（例如答题页中途跳进系统设置变成 settings，或恢复为 timeup）也要切换目标路由
             if (reason != currentReason) {
                 currentReason = reason
-                val targetUrl = Prefs.localBase(context) + "#/" + pageFor(reason)
+                val page = pageFor(reason)
+                if (page == "quiz") SpeechReader.warmUpLocal(context)
+                val targetUrl = Prefs.localBase(context) + "#/$page"
                 web?.let { view ->
                     view.loadUrl(targetUrl)
                     view.evaluateJavascript("window.SOTV_RESUME&&SOTV_RESUME()", null)
@@ -150,6 +152,7 @@ class GateOverlay(
             verifyAttempts = 0
             lastError = ""
             lastErrorKind = ""
+            if (page == "quiz") SpeechReader.warmUpLocal(context)
             if (needLoad) {
                 view.loadUrl(url)
                 view.postDelayed({ try { view.invalidate(); view.requestLayout() } catch (_: Exception) { } }, 350)

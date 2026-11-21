@@ -41,6 +41,7 @@ class GateService : Service() {
     private var lastAccessibilityCheckAt = -1L
     private var countdownActiveAt = -1L
     private var countdownPackage: String? = null
+    private var speechWarmupRequested = false
     private var lastAwake: Boolean? = null
     /** 「一个监控能力都没有」的起始时刻 / 是否已经提示过（#17：不能静默失效） */
     private var capabilityMissingSince = -1L
@@ -84,6 +85,7 @@ class GateService : Service() {
         if (!config.optBoolean("supervisionEnabled", true)) {
             // 纯刷题背诵模式下不拦截其他应用、不锁系统设置、不静音，也不提醒缺少悬浮窗权限
             wasUsing = false
+            speechWarmupRequested = false
             freeNow = true
             gateExpectedNow = false
             beatWatch(false)
@@ -160,6 +162,11 @@ class GateService : Service() {
         val feedbackVisible = !free && hasGate() && pendingFeedback
         AudioController.syncLearningActivity(free, gateExpectedNow)
         wasUsing = active && !free && reason.isEmpty() && !feedbackVisible
+        // 部分电视的本地引擎冷启动超过 15 秒，给到点弹题留出预热时间。
+        val remaining = status.optLong("remainingSeconds") + status.optLong("freeQuotaSeconds")
+        val nearingQuiz = wasUsing && !settingsBlocked && remaining in 0L..25L
+        if (nearingQuiz && !speechWarmupRequested) SpeechReader.warmUpLocal(this)
+        speechWarmupRequested = nearingQuiz
         beatWatch(wasUsing)
         if (!awake || !monitoring || mobileHome || (!settingsBlocked && (ownForeground || (reason.isEmpty() && !feedbackVisible) || (pkg != null && exempt(pkg, false))))) hideAll()
         // #162：无障碍按键过滤只在学习页真的要拦 Home / 任务键时打开，平时关掉，

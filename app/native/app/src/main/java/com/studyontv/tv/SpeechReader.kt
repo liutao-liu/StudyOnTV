@@ -8,6 +8,7 @@ import android.media.AudioTrack
 import android.media.MediaPlayer
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.widget.Toast
@@ -58,6 +59,10 @@ object SpeechReader {
     private var system: TextToSpeech? = null
     private var ready = false
     private var pending: (() -> Unit)? = null
+    private var systemInitAttempt = 0
+    private var systemInitTimeout: Runnable? = null
+    private data class LocalRead(val text: String, val language: String, val rate: Double)
+    private var localRead: LocalRead? = null
     private val tokenLock = Any()
     @Volatile private var token = ""
     @Volatile private var tokenExpires = 0L
@@ -161,21 +166,8 @@ object SpeechReader {
         if (text.isBlank()) return
         val app = context.applicationContext
         main.post {
-            val config = try { JSONObject(DeviceRuntime.store.get("speech_settings", "{}")) } catch (_: Throwable) { JSONObject() }
-            val mode = config.optString("mode", "system")
-            val chosen = if (mode == "auto") when {
-                deepseekKey(config).isNotEmpty() -> "deepseek"
-                config.optString("azureKey").isNotEmpty() -> "azure"
-                config.optString("aliyunSecret").isNotEmpty() -> "aliyun"
-                TtsProbe.defaultEngine(app).isNotEmpty() -> "system"
-                else -> "edge"
-            } else mode
-            // 系统 TTS 使用 QUEUE_FLUSH 覆盖旧播报，避免在部分固件（如 OPPO）上连续调用 system.stop() + speak() 导致后续题目静默丢弃
-            stopNow(stopSystem = chosen != "system")
-            val request = generation
-            this.notice = notice
-            cachedContext = app
-            notify(true, chosen, "preparing", language, language, false, "正在准备朗读")
+            val config = currentSettings()
+            val chosen = readMode(app, config)
             val clean = text.take(10000)
             // #126：家长可以在朗读设置里指定设备朗读语言；留空就跟随每道题的语言标注
             val spoken = when (val override = config.optString("readLanguage").trim()) {
@@ -183,8 +175,40 @@ object SpeechReader {
                 "" -> language          // 跟随题目
                 else -> override
             }
+            val local = if (chosen == "system") LocalRead(clean, spoken, speechRate(config)) else null
+            // 手动再点一次同一道题时，让首段继续准备，避免重复排队合成。
+            if (local != null && local == localRead && localIndex == 0 && last?.optString("reason") == "preparing") {
+                if (notice != null) this.notice = notice
+                return@post
+            }
+            stopNow(stopSystem = chosen != "system")
+            val request = generation
+            localRead = local
+            this.notice = notice
+            cachedContext = app
+            notify(true, chosen, "preparing", language, language, false, "正在准备朗读")
             if (chosen == "system") systemRead(app, clean, spoken, request)
             else cloudPart(app, cloudChunks(clean, chosen), 0, spoken, config, chosen, request)
+        }
+    }
+
+    private fun readMode(context: Context, config: JSONObject): String {
+        val mode = config.optString("mode", "system")
+        if (mode != "auto") return mode
+        return when {
+            deepseekKey(config).isNotEmpty() -> "deepseek"
+            config.optString("azureKey").isNotEmpty() -> "azure"
+            config.optString("aliyunSecret").isNotEmpty() -> "aliyun"
+            TtsProbe.defaultEngine(context).isNotEmpty() -> "system"
+            else -> "edge"
+        }
+    }
+
+    /** 提前连接本地引擎。首题复用同一个连接，预热期间不合成、不播放。 */
+    fun warmUpLocal(context: Context) {
+        val app = context.applicationContext
+        main.post {
+            if (system == null && readMode(app, currentSettings()) == "system") connectSystem(app)
         }
     }
 
@@ -323,10 +347,10 @@ object SpeechReader {
     }
 
     private fun stopNow(stopSystem: Boolean = true) {
-        generation++; pending = null
+        generation++; pending = null; localRead = null
         localTimeout?.let { main.removeCallbacks(it) }; localTimeout = null
         localFile?.delete(); localFile = null; localParts = emptyList(); localIndex = 0; localFailures = 0
-        if (stopSystem) system?.stop()
+        if (stopSystem && ready) system?.stop()
         track?.let {
             try { it.pause(); it.flush() } catch (_: Exception) { }
             try { it.release() } catch (_: Exception) { }
@@ -412,16 +436,38 @@ object SpeechReader {
         if (ready) speak()
         else {
             pending = speak
-            if (system == null) system = TextToSpeech(context) { status ->
-                main.post {
-                    ready = status == TextToSpeech.SUCCESS
-                    val action = pending; pending = null
-                    if (ready) system?.setOnUtteranceProgressListener(progress)
-                    else { system?.shutdown(); system = null; Diag.warn("Speech", "tts init failed status=$status") }
-                    // 初始化失败时 speakSystem 会看到 system==null 并回报“系统语音不可用”
-                    action?.invoke()
-                }
+            connectSystem(context)
+        }
+    }
+
+    private fun connectSystem(context: Context) {
+        if (system != null) return
+        val attempt = ++systemInitAttempt
+        val started = SystemClock.elapsedRealtime()
+        fun finish(status: Int, detail: String) {
+            val timeout = systemInitTimeout ?: return
+            if (attempt != systemInitAttempt) return
+            main.removeCallbacks(timeout)
+            systemInitTimeout = null
+            val elapsed = SystemClock.elapsedRealtime() - started
+            ready = status == TextToSpeech.SUCCESS && system != null
+            if (ready) {
+                system?.setOnUtteranceProgressListener(progress)
+                Diag.info("Speech", "local engine ready in ${elapsed}ms")
+            } else {
+                try { system?.shutdown() } catch (_: Exception) { }
+                system = null
+                Diag.warn("Speech", "local engine init failed after ${elapsed}ms: $detail")
             }
+            val action = pending
+            pending = null
+            action?.invoke()
+        }
+        systemInitTimeout = Runnable { finish(TextToSpeech.ERROR, "timeout") }.also { main.postDelayed(it, 30_000L) }
+        try {
+            system = TextToSpeech(context) { status -> main.post { finish(status, "status=$status") } }
+        } catch (e: Exception) {
+            finish(TextToSpeech.ERROR, e.javaClass.simpleName)
         }
     }
 
@@ -452,8 +498,7 @@ object SpeechReader {
         } catch (_: Exception) { }
         try { engine.setAudioAttributes(attributes) } catch (_: Exception) { }
         try {
-            val rate = currentSettings().optDouble("speechRate", 1.0).takeIf { it.isFinite() }?.coerceIn(0.7, 1.5) ?: 1.0
-            engine.setSpeechRate(rate.toFloat())
+            engine.setSpeechRate((localRead?.rate ?: speechRate(currentSettings())).toFloat())
         } catch (_: Exception) { }
         val localText = MandarinSpeech.normalize(text, plan.language)
         currentText = localText; currentLanguage = plan.language; retriedDefault = plan.degraded
@@ -468,6 +513,9 @@ object SpeechReader {
         if (requested.isBlank() || normalizeLanguageTag(requested).startsWith("zh")) "zh-CN" else defaultLanguage()
 
     private fun currentSettings(): JSONObject = try { JSONObject(DeviceRuntime.store.get("speech_settings", "{}")) } catch (_: Exception) { JSONObject() }
+
+    private fun speechRate(config: JSONObject): Double =
+        config.optDouble("speechRate", 1.0).takeIf { it.isFinite() }?.coerceIn(0.7, 1.5) ?: 1.0
 
     /**
      * 云端合成的分段。DeepSeek 一次最多读 1 万字，按句子攒到 400 字再请求，避免长题被切成十几段；
