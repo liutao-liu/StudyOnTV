@@ -22,7 +22,7 @@ window.SOTVNative={
 };
 function mockRound(number) {
   return {nonce:'mock-'+number,mode:'practice',answered:number-1,target:3,
-    question:{id:'q'+number,q:number===1?'小明有三个苹果，妈妈又给了他两个苹果，现在一共有几个苹果？':'第二道题：七加八等于多少？',type:'single',a:['三个','五个','六个','十五个'],k:1}};
+    question:{id:'q'+number,q:number===1?'小明有三个苹果，妈妈又给了他两个苹果，现在一共有几个苹果？':'第二道题：七加八等于多少？',type:'single',a:['三个','五个','六个','十五个'],k:1,audio:'/api/media/mock.mp3'}};
 }
 window.XMLHttpRequest=function(){};
 XMLHttpRequest.prototype.open=function(method,path){this.path=path};
@@ -35,6 +35,7 @@ XMLHttpRequest.prototype.send=function(body){
     if(self.path==='/api/quiz/start'){
       if(payload.focus==='quiz')window.__question=1;
       data=window.__question?mockRound(window.__question):{watching:true,status:learning};
+      if(window.__showReview)data={reviewed:true,reviewId:'mock-review',score:100,result:{correct:true}};
     }
     if(self.path==='/api/quiz/answer')data={correct:payload.selections[0]===1,correctIndices:[1],next:mockRound(2)};
     if(self.path==='/api/quiz/continue'){window.__question=2;data={status:learning};}
@@ -85,13 +86,20 @@ checkAfter(60,function(){
 });
 }
 function checkFeedback(correct) {
-  var feedback=document.getElementById('qFeedback'), next=document.getElementById('fbNext');
+  var feedback=document.getElementById('qFeedback'), screen=document.getElementById('screen-quiz');
+  var next=document.getElementById('fbNext'), speaker=document.getElementById('readAloudBtn');
+  var media=document.querySelector('#qMedia [data-action="play-audio"]');
   assert(feedback.classList.contains(correct?'is-right':'is-wrong'),'wrong feedback state');
   assert(window.__feedbackToken && next.disabled,'feedback audio did not start');
-  assert(feedback.querySelectorAll('button').length===1 && next.textContent==='继续','feedback shows playback controls');
-  window.SOTV_QUIZ_READ_DONE(window.__feedbackToken,true);
+  assert(!next.offsetWidth && !speaker.offsetWidth && !media.offsetWidth,'a button is visible during feedback playback');
+  assert(!screen.querySelector('.focused') && !TV.move('right'),'remote focus is available during feedback playback');
+  TV.select();
+  assert(!TV.state.continuing,'OK continued while feedback was playing');
+  window.SOTV_QUIZ_READ_DONE(window.__feedbackToken,correct);
   window.__feedbackToken=null;
-  assert(next.textContent==='继续' && !next.disabled,'continuation did not become available');
+  assert(feedback.querySelectorAll('button').length===1 && next.textContent==='继续','feedback shows playback controls');
+  assert(next.offsetWidth && !next.disabled && next.classList.contains('focused'),'continuation did not return with remote focus');
+  assert(speaker.offsetWidth && media.offsetWidth,'question audio controls did not return');
 }
 function checkNext(){
 assert(document.querySelector('.focused').id==='readAloudBtn','new question must refocus icon');
@@ -99,8 +107,17 @@ TV.select();assert(window.__calls.length===2&&window.__calls[1].indexOf('第二�
 document.querySelector('[data-opt="1"]').click();
 checkAfter(60,function(){
   checkFeedback(true);
-  document.documentElement.setAttribute('data-reading-result','PASS');
+  window.__showReview=true;
+  window.location.hash='#/quiz?review';
+  checkAfter(100,checkReview);
 });
+}
+function checkReview(){
+  var next=document.getElementById('reviewContinue');
+  assert(next && window.__feedbackToken && !next.offsetWidth,'review continuation is visible during feedback playback');
+  window.SOTV_QUIZ_READ_DONE(window.__feedbackToken,true);
+  assert(next.offsetWidth && !next.disabled && next.classList.contains('focused'),'review continuation did not return with remote focus');
+  document.documentElement.setAttribute('data-reading-result','PASS');
 }
 window.addEventListener('load',function(){checkAfter(100,checkEntry)});
 </script>`;
@@ -117,5 +134,5 @@ for (const [width, height] of [[1280,720],[1920,1080]]) {
         {encoding:'utf8', maxBuffer:10*1024*1024, stdio:['ignore','pipe','ignore']});
     const match = result.match(/data-reading-result="([^"]+)"/);
     if (match?.[1] !== 'PASS') throw Error(`${width}x${height}: ${match?.[1] || 'test did not finish'}`);
-    console.log(`PASS ${width}x${height}: entry and resume focus, remote reading and navigation, correct and incorrect feedback`);
+    console.log(`PASS ${width}x${height}: entry focus, remote reading, and hidden controls during answer and review feedback`);
 }

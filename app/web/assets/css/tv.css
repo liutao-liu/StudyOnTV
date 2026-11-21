@@ -448,6 +448,7 @@ html.tv-device .hint { display: -webkit-flex; display: flex; }
   -webkit-animation: fbUp .26s cubic-bezier(.22,.61,.36,1); animation: fbUp .26s cubic-bezier(.22,.61,.36,1);
 }
 .feedback.show { display: -webkit-flex; display: flex; }
+.screen.playing-feedback .focusable { display: none; }
 .feedback.is-wrong { border-top-color: #F2545B; background: #24100F; }
 @-webkit-keyframes fbUp { from { -webkit-transform: translate3d(0,100%,0); } to { -webkit-transform: none; } }
 @keyframes fbUp { from { transform: translate3d(0,100%,0); } to { transform: none; } }

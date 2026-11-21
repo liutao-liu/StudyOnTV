@@ -918,17 +918,25 @@
   }
   function hideFeedback() {
     window.clearTimeout(nextTimer);
-    stopFeedbackReading();
     $('qFeedback').className = 'feedback';
+    $('screen-quiz').classList.remove('playing-feedback');
     state.feedback = null;
+    stopFeedbackReading();
   }
   function updateFeedbackClock() {
-    var reading = feedbackPhrasePlaying(), reviewGo = $('reviewContinue');
-    if (reviewGo) reviewGo.disabled = reading;
-    if (!state.feedback) return;
-    var seconds = Math.max(0, Math.ceil(((state.feedbackUntil || 0) - Date.now()) / 1000)), go = $('fbNext');
+    var feedback = state.screen === 'quiz' && state.feedback;
+    var go = feedback ? $('fbNext') : state.screen === 'lock' && state.reviewed ? $('reviewContinue') : null;
+    if (!go) return;
+    var screen = $('screen-' + state.screen), reading = feedbackPhrasePlaying();
+    var wasReading = screen.classList.contains('playing-feedback');
+    screen.classList.toggle('playing-feedback', reading);
+    var seconds = feedback ? Math.max(0, Math.ceil(((state.feedbackUntil || 0) - Date.now()) / 1000)) : 0;
     go.disabled = reading || seconds > 0;
-    go.textContent = seconds > 0 ? '查看解析 · ' + seconds + ' 秒' : state.feedback.finished ? '查看结果' : '继续';
+    if (feedback) go.textContent = seconds > 0 ? '查看解析 · ' + seconds + ' 秒' : feedback.finished ? '查看结果' : '继续';
+    if (reading === wasReading) return;
+    if (reading) setFocus(-1);
+    else if (isTv()) focusDefault(go);
+    else go.focus();
   }
   window.setInterval(updateFeedbackClock, 500);
   function proceed() {
