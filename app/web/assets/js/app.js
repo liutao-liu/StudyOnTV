@@ -53,28 +53,23 @@
   // 朗读内容由家长在「设置 → 朗读」里定：只读题干、题干加选项、再加答案（答案在作答后才读）
   var lastAutoReadKey = '', lastAutoReadText = '';
   var QUESTION_READ_PASSES = 3, QUESTION_READ_GAP_MS = 3000;
-  var quizRead = null, quizReadTimer, feedbackRead = null, feedbackAudio = null, speechSerial = 0;
-  function updateReadingStatus() {
-    var status = $('qReadingStatus');
-    status.textContent = quizRead ? (quizRead.token ? '🔊 朗读 ' + quizRead.pass : '🔊 等待朗读 ' + (quizRead.pass + 1)) + ' / ' + QUESTION_READ_PASSES : '';
-    status.style.display = quizRead ? '' : 'none';
+  var quizRead = null, quizReadTimer, feedbackRead = null, speechSerial = 0;
+  function updateReadButton() {
     var read = $('readAloudBtn');
     read.setAttribute('aria-label', quizRead ? '停止朗读' : '朗读题目');
     read.setAttribute('title', quizRead ? '按确定键停止朗读' : '按确定键朗读题目');
-    window.setTimeout(fitQuiz, 0);
   }
   function stopQuizReading() {
     window.clearTimeout(quizReadTimer);
     quizRead = null;
     nativeCall('stopReading');
-    updateReadingStatus();
+    updateReadButton();
   }
   function readQuizPass() {
     var reading = quizRead;
     if (!reading) return;
     reading.pass++;
     reading.token = 'read-' + (++speechSerial);
-    updateReadingStatus();
     nativeCall('readQuizPass', [reading.text, reading.language, reading.token]);
   }
   function repeatQuestion(text, language) {
@@ -85,6 +80,7 @@
     }
     stopQuizReading();
     quizRead = { text: text, language: language || '', pass: 0 };
+    updateReadButton();
     readQuizPass();
   }
   function autoReadQuestion(key, text, language) {
@@ -399,13 +395,21 @@
         return;
       }
       if (result.watching && !payload.focus) {
-        state.lockReason = '';
+        var actions = $('lockActions');
+        var continueStudy = state.screen === 'lock' && $('watchingContinueQuiz');
+        state.lockReason = state.learning.reason || '';
+        state.wasFree = !!state.learning.free;
         show('lock'); $('lockTitle').textContent = '已解锁使用时间';
         $('lockDesc').textContent = '还可以使用 ' + Math.ceil(state.learning.remainingSeconds / 60) + ' 分钟';
         icon($('lockIcon'), 'check'); $('lockNote').textContent = '';
-        $('lockActions').innerHTML = '<button class="btn btn-primary focusable" data-action="home">返回桌面</button>' +
-          '<button class="btn btn-ghost focusable" data-action="start-study" data-focus="quiz">继续练题</button>';
-        focusDefault(); return;
+        // 原生恢复页面时沿用已有按钮，保留用户刚移动到的遥控器焦点。
+        if (!continueStudy) {
+          actions.innerHTML = '<button class="btn btn-primary focusable" data-action="home">返回桌面</button>' +
+            '<button class="btn btn-ghost focusable" id="watchingContinueQuiz" data-action="start-study" data-focus="quiz">继续练题</button>';
+          continueStudy = actions.lastElementChild;
+        }
+        if (!actions.querySelector('.focused')) focusDefault(continueStudy);
+        return;
       }
       if (!result.question) {
         if (result.quizEmpty) return quizEmpty(result.quizEmptyMessage);
@@ -743,7 +747,7 @@
     if (!wrap) return;
     if (!isTv() || !state.round || state.screen !== 'quiz') { wrap.className = 'quiz-wrap'; return; }
     var head = wrap.querySelector('.quiz-head'), foot = wrap.querySelector('.quiz-foot');
-    var question = $('qText'), options = quizRead ? $('qReadingStatus') : $('qOptions');
+    var question = $('qText'), options = $('qOptions');
     // 前两档要求整屏放下；最后一档允许超出，交给 #stage 滚动
     var steps = ['', 'compact', 'compact-2'];
     for (var i = 0; i < steps.length; i++) {
@@ -832,27 +836,22 @@
     var speech = state.speech || {}, configured = speech.readLanguage || '';
     var system = speech.systemLanguage || '';
     var english = /^en(?:-|$)/i.test(configured === 'system' ? system : configured || language || system);
-    feedbackAudio = { message: message, answer: answer ? (english ? 'The correct answer is ' : '正确答案是：') + answer : '',
+    if (feedbackRead) return;
+    var audio = { message: message, answer: answer ? (english ? 'The correct answer is ' : '正确答案是：') + answer : '',
       language: language || '' };
-    playFeedback(done);
-  }
-  function playFeedback(done) {
-    var audio = feedbackAudio;
-    if (!audio || feedbackRead) return;
     if (!canRead() || typeof window.SOTVNative.readQuizPass !== 'function') {
       nativeCall('readInLanguage', [audio.message + (audio.answer ? '\n' + audio.answer : ''), audio.language]);
       if (done) done();
       return;
     }
     var method = typeof window.SOTVNative.readFeedbackPhrase === 'function' ? 'readFeedbackPhrase' : 'readQuizPass';
-    feedbackRead = { token: 'feedback-' + (++speechSerial), done: done, speakingAnswer: false };
+    feedbackRead = { token: 'feedback-' + (++speechSerial), done: done, speakingAnswer: false, audio: audio };
     updateFeedbackClock();
     var token = feedbackRead.token;
     feedbackRead.timer = window.setTimeout(function () {
       if (!feedbackRead || feedbackRead.token !== token) return;
       var callback = feedbackRead.done;
       stopFeedbackReading();
-      toast('评语朗读超时，可以选择「重听评语」');
       if (callback) callback();
     }, 25000);
     nativeCall(method, [audio.message, audio.language, token]);
@@ -920,21 +919,16 @@
   function hideFeedback() {
     window.clearTimeout(nextTimer);
     stopFeedbackReading();
-    feedbackAudio = null;
     $('qFeedback').className = 'feedback';
     state.feedback = null;
   }
   function updateFeedbackClock() {
-    var reading = feedbackPhrasePlaying(), reviewGo = $('reviewContinue'), reviewReplay = $('reviewReplay');
+    var reading = feedbackPhrasePlaying(), reviewGo = $('reviewContinue');
     if (reviewGo) reviewGo.disabled = reading;
-    if (reviewReplay) { reviewReplay.disabled = !!feedbackRead; reviewReplay.style.display = canRead() ? '' : 'none'; }
     if (!state.feedback) return;
     var seconds = Math.max(0, Math.ceil(((state.feedbackUntil || 0) - Date.now()) / 1000)), go = $('fbNext');
-    var replay = $('fbReplay');
-    replay.disabled = !!feedbackRead;
-    replay.style.display = canRead() ? '' : 'none';
     go.disabled = reading || seconds > 0;
-    go.textContent = reading ? '正在朗读…' : seconds > 0 ? '查看解析 · ' + seconds + ' 秒' : state.feedback.finished ? '查看结果' : '继续';
+    go.textContent = seconds > 0 ? '查看解析 · ' + seconds + ' 秒' : state.feedback.finished ? '查看结果' : '继续';
   }
   window.setInterval(updateFeedbackClock, 500);
   function proceed() {
@@ -996,8 +990,7 @@
     $('lockDesc').textContent = result.feedback || '已保存本次批改结果';
     var message = feedbackPhrase(!!result.result.correct);
     $('lockNote').textContent = message;
-    $('lockActions').innerHTML = '<button class="btn btn-primary focusable" id="reviewContinue" data-action="review-continue">' + (result.result.finished && result.result.passed && !isPureStudyMode() ? '继续使用' : '继续答题') + '</button>' +
-      '<button class="btn btn-ghost focusable" id="reviewReplay" data-action="replay-feedback">重听评语</button>';
+    $('lockActions').innerHTML = '<button class="btn btn-primary focusable" id="reviewContinue" data-action="review-continue">' + (result.result.finished && result.result.passed && !isPureStudyMode() ? '继续使用' : '继续答题') + '</button>';
     if (window.SOTV_MATH) window.SOTV_MATH($('lockDesc'));
     focusDefault();
     announceResult(message, '', '');
@@ -1163,11 +1156,10 @@
     if (list[index]) { list[index].classList.add('focused'); reveal(list[index]); state.focusKey = focusKey(list[index]); }
   }
   function focusKey(el) { return el.getAttribute('data-opt') !== null ? 'opt' + el.getAttribute('data-opt') : el.getAttribute('data-action') || el.id || ''; }
-  function focusDefault() {
+  function focusDefault(preferred) {
     if (!isTv()) return;
-    var list = focusables(), read = $('readAloudBtn');
-    if (state.screen === 'quiz' && !state.feedback && read && list.indexOf(read) >= 0) setFocus(list.indexOf(read));
-    else setFocus(0);
+    if (!preferred && state.screen === 'quiz' && !state.feedback) preferred = $('readAloudBtn');
+    setFocus(Math.max(0, focusables().indexOf(preferred)));
   }
   // 返回 true 表示焦点移动了；false 表示已到边缘（原生层据此判断“在最上方连按 ↑”打开家长入口）
   function move(dir) {
@@ -1296,10 +1288,6 @@
         }
       });
       return;
-    }
-    if (action === 'replay-feedback' && (state.feedback || state.reviewed) && !feedbackRead) {
-      window.clearTimeout(nextTimer);
-      playFeedback();
     }
     if (action === 'review-continue' && !state.busy && !feedbackPhrasePlaying()) {
       stopFeedbackReading();
@@ -1523,7 +1511,7 @@
         if (state.reviewed || state.feedback) return;
         if (state.awaiting) { if (!state.learning.awaitingReview) { if (isHubAvailable()) renderHub(); else start(); } return; }
         if (state.round && state.round.studyPhase === 'memorize') return;
-        if (state.screen === 'lock' && (state.lockReason !== state.learning.reason || state.wasFree !== !!state.learning.free)) {
+        if (state.screen === 'lock' && (state.lockReason !== (state.learning.reason || '') || state.wasFree !== !!state.learning.free)) {
           state.wasFree = !!state.learning.free;
           if (isHubAvailable()) renderHub();
           else if (!state.learning.reason) start();
@@ -1574,11 +1562,12 @@
   window.SOTV_QUIZ_READ_DONE = function (token, ok) {
     if (feedbackRead && feedbackRead.token === token) {
       window.clearTimeout(feedbackRead.timer);
-      if (ok && !feedbackRead.speakingAnswer && feedbackAudio && feedbackAudio.answer) {
+      var audio = feedbackRead.audio;
+      if (ok && !feedbackRead.speakingAnswer && audio.answer) {
         feedbackRead.speakingAnswer = true;
         feedbackRead.token = 'feedback-' + (++speechSerial);
         updateFeedbackClock();
-        nativeCall('readQuizPass', [feedbackAudio.answer, feedbackAudio.language, feedbackRead.token]);
+        nativeCall('readQuizPass', [audio.answer, audio.language, feedbackRead.token]);
         return;
       }
       var done = feedbackRead.done;
@@ -1590,11 +1579,10 @@
     if (!quizRead || quizRead.token !== token) return;
     if (ok && quizRead.pass < QUESTION_READ_PASSES) {
       quizRead.token = null;
-      updateReadingStatus();
       quizReadTimer = window.setTimeout(readQuizPass, QUESTION_READ_GAP_MS);
     } else {
       quizRead = null;
-      updateReadingStatus();
+      updateReadButton();
     }
   };
   window.SOTV_NAVIGATION_BLOCKED = function (message) { toast(message || '现在暂不可用'); return true; };
